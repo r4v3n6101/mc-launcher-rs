@@ -32,3 +32,23 @@ pub struct VersionsManifest {
     pub latest: LatestInfo,
     pub versions: Vec<VersionInfo>,
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::VersionsManifest;
+
+    const VERSIONS_MANIFEST_URL: &str =
+        "https://launchermeta.mojang.com/mc/game/version_manifest.json";
+
+    #[tokio::test]
+    async fn print_versions_manifest() {
+        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        println!("{:?}", manifest);
+    }
+}

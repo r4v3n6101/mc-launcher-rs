@@ -1,12 +1,23 @@
-use super::{manifest::ReleaseType, rule::Rule};
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
+
+use super::{manifest::ReleaseType, rule::Rule};
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum ArgumentValue {
+    One(String),
+    Many(Vec<String>),
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum Argument {
-    Plain { value: String },
-    OsSpecific { value: String, rules: Vec<Rule> },
+    Plain(String),
+    RuleSpecific {
+        value: ArgumentValue,
+        rules: Vec<Rule>,
+    },
 }
 
 #[derive(Deserialize, Debug)]
@@ -50,4 +61,23 @@ pub struct GameInfo {
     pub time: DateTime<Utc>,
     #[serde(rename = "type")]
     pub release_type: ReleaseType,
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::GameInfo;
+
+    const VERSION_22W15A_INFO_URL: &str = "https://launchermeta.mojang.com/v1/packages/884c9042aa5877be1e8e282a4723a7778e1246ab/22w15a.json";
+
+    #[tokio::test]
+    async fn print_game_info() {
+        let game_info: GameInfo = reqwest::get(VERSION_22W15A_INFO_URL)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        println!("{:?}", game_info);
+    }
 }
