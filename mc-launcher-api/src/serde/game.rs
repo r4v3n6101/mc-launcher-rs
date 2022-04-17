@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
 
@@ -27,13 +29,19 @@ pub struct Arguments {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetIndex {
-    pub id: String,
+pub struct FileDescription {
     pub sha1: String,
     pub size: usize,
-    pub total_size: usize,
     pub url: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetIndex {
+    #[serde(flatten)]
+    pub file_description: FileDescription,
+    pub id: String,
+    pub total_size: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -44,40 +52,44 @@ pub struct JavaVersion {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct LoggerConfig {
+    #[serde(flatten)]
+    pub file_description: FileDescription,
+    pub id: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct LoggingConfig {
+    pub argument: String,
+    #[serde(rename = "file")]
+    pub config: LoggerConfig,
+    #[serde(rename = "type")]
+    pub log_type: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct LoggingInfo {
+    #[serde(rename = "client")]
+    pub client_config: LoggingConfig,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GameInfo {
-    pub arguments: Arguments,
+    pub arguments: Option<Arguments>,
     pub asset_index: AssetIndex,
     pub assets: String,
-    pub compliance_level: usize,
-    // TODO : downloads
+    pub compliance_level: Option<usize>,
+    pub downloads: HashMap<String, FileDescription>,
     pub id: String,
-    pub java_version: JavaVersion,
+    pub java_version: Option<JavaVersion>,
     // TODO : libraries
-    // TODO : logging
+    pub logging_info: Option<LoggingInfo>,
     pub main_class: String,
+    pub minecraft_arguments: Option<String>,
     pub minimum_launcher_version: usize,
     pub release_time: DateTime<Utc>,
     pub time: DateTime<Utc>,
     #[serde(rename = "type")]
     pub release_type: ReleaseType,
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::GameInfo;
-
-    const VERSION_22W15A_INFO_URL: &str = "https://launchermeta.mojang.com/v1/packages/884c9042aa5877be1e8e282a4723a7778e1246ab/22w15a.json";
-
-    #[tokio::test]
-    async fn print_game_info() {
-        let game_info: GameInfo = reqwest::get(VERSION_22W15A_INFO_URL)
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        println!("{:?}", game_info);
-    }
 }

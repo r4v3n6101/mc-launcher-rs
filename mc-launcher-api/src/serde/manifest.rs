@@ -38,12 +38,9 @@ mod tests {
 
     use super::VersionsManifest;
 
-    const VERSIONS_MANIFEST_URL: &str =
-        "https://launchermeta.mojang.com/mc/game/version_manifest.json";
-
     #[tokio::test]
     async fn print_versions_manifest() {
-        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
+        let manifest: VersionsManifest = reqwest::get(crate::VERSIONS_MANIFEST_URL)
             .await
             .unwrap()
             .json()
