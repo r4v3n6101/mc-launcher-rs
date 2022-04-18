@@ -59,37 +59,36 @@ pub struct LoggerConfig {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct LoggingConfig {
+pub struct LoggerDescription {
     pub argument: String,
-    #[serde(rename = "file")]
-    pub config: LoggerConfig,
     #[serde(rename = "type")]
     pub log_type: String,
+    #[serde(rename = "file")]
+    pub config: LoggerConfig,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct LoggingInfo {
-    #[serde(rename = "client")]
-    pub client_config: LoggingConfig,
+pub struct Logging {
+    pub client: LoggerDescription,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GameInfo {
-    pub arguments: Option<Arguments>,
-    pub asset_index: AssetIndex,
-    pub assets: String,
-    pub compliance_level: Option<usize>,
-    pub downloads: HashMap<String, FileDescription>,
     pub id: String,
-    pub java_version: Option<JavaVersion>,
-    // TODO : libraries
-    pub logging_info: Option<LoggingInfo>,
-    pub main_class: String,
-    pub minecraft_arguments: Option<String>,
+    #[serde(rename = "type")]
+    pub release_type: ReleaseType,
     pub minimum_launcher_version: usize,
     pub release_time: DateTime<Utc>,
     pub time: DateTime<Utc>,
-    #[serde(rename = "type")]
-    pub release_type: ReleaseType,
+    pub downloads: HashMap<String, FileDescription>,
+    pub asset_index: AssetIndex,
+    pub assets: String,
+    pub main_class: String,
+    // TODO : libraries
+    pub java_version: Option<JavaVersion>,
+    pub arguments: Option<Arguments>,
+    pub minecraft_arguments: Option<String>,
+    pub logging: Option<Logging>,
+    pub compliance_level: Option<usize>,
 }
