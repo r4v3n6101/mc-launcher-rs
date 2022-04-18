@@ -23,9 +23,14 @@ pub enum Argument {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct Arguments {
-    pub game: Vec<Argument>,
-    pub jvm: Vec<Argument>,
+pub enum Arguments {
+    #[serde(rename = "arguments")]
+    Modern {
+        game: Vec<Argument>,
+        jvm: Vec<Argument>,
+    },
+    #[serde(rename = "minecraftArguments")]
+    Legacy(String),
 }
 
 #[derive(Deserialize, Debug)]
@@ -85,10 +90,10 @@ pub struct GameInfo {
     pub asset_index: AssetIndex,
     pub assets: String,
     pub main_class: String,
+    #[serde(flatten)]
+    pub arguments: Arguments,
     // TODO : libraries
     pub java_version: Option<JavaVersion>,
-    pub arguments: Option<Arguments>,
-    pub minecraft_arguments: Option<String>,
     pub logging: Option<Logging>,
     pub compliance_level: Option<usize>,
 }
