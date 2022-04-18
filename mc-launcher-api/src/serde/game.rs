@@ -3,7 +3,28 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
 
-use super::{manifest::ReleaseType, rule::Rule};
+use super::manifest::ReleaseType;
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    Allow,
+    Disallow,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct OsDescription {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub arch: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Rule {
+    pub action: RuleAction,
+    pub os: Option<OsDescription>,
+    pub features: Option<HashMap<String, bool>>,
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
@@ -34,7 +55,7 @@ pub enum Arguments {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct FileDescription {
+pub struct Resource {
     pub sha1: String,
     pub size: usize,
     pub url: String,
@@ -44,22 +65,15 @@ pub struct FileDescription {
 #[serde(rename_all = "camelCase")]
 pub struct AssetIndex {
     #[serde(flatten)]
-    pub file_description: FileDescription,
+    pub resource: Resource,
     pub id: String,
     pub total_size: usize,
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct JavaVersion {
-    pub component: String,
-    pub major_version: usize,
-}
-
-#[derive(Deserialize, Debug)]
 pub struct LoggerConfig {
     #[serde(flatten)]
-    pub file_description: FileDescription,
+    pub resource: Resource,
     pub id: String,
 }
 
@@ -78,6 +92,35 @@ pub struct Logging {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct LibraryResource {
+    #[serde(flatten)]
+    pub resource: Resource,
+    pub path: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct LibraryResources {
+    pub artifact: Option<LibraryResource>,
+    #[serde(rename = "classifiers")]
+    pub other: Option<HashMap<String, LibraryResource>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Library {
+    #[serde(rename = "downloads")]
+    pub resources: LibraryResources,
+    pub name: String,
+    pub rules: Option<Vec<Rule>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaVersion {
+    pub component: String,
+    pub major_version: usize,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GameInfo {
     pub id: String,
@@ -86,13 +129,14 @@ pub struct GameInfo {
     pub minimum_launcher_version: usize,
     pub release_time: DateTime<Utc>,
     pub time: DateTime<Utc>,
-    pub downloads: HashMap<String, FileDescription>,
+    pub libraries: Vec<Library>,
+    pub downloads: HashMap<String, Resource>,
     pub asset_index: AssetIndex,
     pub assets: String,
     pub main_class: String,
     #[serde(flatten)]
     pub arguments: Arguments,
-    // TODO : libraries
+
     pub java_version: Option<JavaVersion>,
     pub logging: Option<Logging>,
     pub compliance_level: Option<usize>,
