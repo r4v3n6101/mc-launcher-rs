@@ -1,7 +1,6 @@
 use futures::{stream, StreamExt};
-use mc_launcher_api::{
-    serde::{game::GameInfo, manifest::VersionsManifest},
-    VERSIONS_MANIFEST_URL,
+use mc_launcher_api::metadata::{
+    game::GameInfo, manifest::VersionsManifest, resources::VERSIONS_MANIFEST_URL,
 };
 
 #[tokio::test]

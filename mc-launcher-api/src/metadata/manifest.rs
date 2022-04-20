@@ -36,11 +36,11 @@ pub struct VersionsManifest {
 #[cfg(test)]
 mod tests {
 
-    use super::VersionsManifest;
+    use super::{super::resources::VERSIONS_MANIFEST_URL, VersionsManifest};
 
     #[tokio::test]
     async fn print_versions_manifest() {
-        let manifest: VersionsManifest = reqwest::get(crate::VERSIONS_MANIFEST_URL)
+        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
             .await
             .unwrap()
             .json()
