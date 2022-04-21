@@ -23,6 +23,7 @@ struct FileMetadata {
     location: Box<Path>,
     remote_location: String,
     sha1: String,
+    size: usize,
     file_type: FileType,
 }
 
@@ -44,14 +45,17 @@ impl GameFile {
 
     #[instrument]
     async fn pull(&mut self) -> crate::Result<()> {
-        let mut output = BufWriter::new(&mut self.file);
+        const BUF_SIZE: usize = 128 * 1024; // 128kb
+        let mut output = BufWriter::with_capacity(BUF_SIZE, &mut self.file);
         let mut response = reqwest::get(&self.metadata.remote_location).await?;
         debug!(?response);
         while let Some(chunk) = response.chunk().await? {
             trace!(len = chunk.len(), "New chunk arrived");
             output.write_all(&chunk).await?;
+            trace!(len = chunk.len(), "New chunk written");
         }
         output.flush().await?;
+        trace!("Rest flushed");
         Ok(())
     }
 }
@@ -62,6 +66,7 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
+    #[instrument(skip(root_dir))]
     pub async fn create_with_default_hierarchy(
         root_dir: impl AsRef<Path>,
         game_info: &GameInfo,
@@ -80,6 +85,7 @@ impl FileStorage {
                 let lib_res_to_game_file = |lib_res: &LibraryResource, file_type| FileMetadata {
                     location: libs_dir.join(&lib_res.path).into_boxed_path(),
                     remote_location: lib_res.resource.url.clone(),
+                    size: lib_res.resource.size,
                     sha1: lib_res.resource.sha1.clone(),
                     file_type,
                 };
@@ -96,7 +102,7 @@ impl FileStorage {
         let binaries = game_info
             .downloads
             .iter()
-            .map(|(name, Resource { sha1, url, .. })| {
+            .map(|(name, Resource { sha1, url, size })| {
                 let filename = match name.as_str() {
                     "client" => "client.jar",
                     "client_mappings" => "client_mappings.txt",
@@ -107,6 +113,7 @@ impl FileStorage {
                 FileMetadata {
                     location: bin_dir.join(filename).into_boxed_path(),
                     remote_location: url.clone(),
+                    size: *size,
                     sha1: sha1.clone(),
                     file_type: FileType::Binary,
                 }
