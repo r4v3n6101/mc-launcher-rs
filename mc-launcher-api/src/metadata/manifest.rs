@@ -32,20 +32,3 @@ pub struct VersionsManifest {
     pub latest: LatestInfo,
     pub versions: Vec<VersionInfo>,
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::{super::resources::VERSIONS_MANIFEST_URL, VersionsManifest};
-
-    #[tokio::test]
-    async fn print_versions_manifest() {
-        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        println!("{:?}", manifest);
-    }
-}

@@ -1,4 +1,4 @@
-use futures::{stream, StreamExt};
+use futures_util::{stream, StreamExt};
 use mc_launcher_api::metadata::{
     game::GameInfo, manifest::VersionsManifest, resources::VERSIONS_MANIFEST_URL,
 };
