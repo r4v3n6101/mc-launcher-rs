@@ -1,8 +1,8 @@
-use std::{iter, path::Path};
+use std::{io, iter, path::Path};
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use tokio::{
-    fs::{create_dir_all, File},
+    fs::{create_dir_all, File, OpenOptions},
     io::{AsyncWriteExt, BufWriter},
 };
 use tracing::{debug, instrument, trace};
@@ -20,42 +20,67 @@ enum FileType {
 
 #[derive(Debug)]
 struct FileMetadata {
-    location: Box<Path>,
     remote_location: String,
-    sha1: String,
-    size: usize,
+    remote_size: usize,
+    remote_sha1: String,
+    location: Box<Path>,
     file_type: FileType,
 }
 
 #[derive(Debug)]
 struct GameFile {
     metadata: FileMetadata,
-    file: File,
+    file: Option<File>,
 }
 
 impl GameFile {
     #[instrument]
-    async fn create(metadata: FileMetadata) -> crate::Result<Self> {
-        if let Some(parent) = metadata.location.parent() {
-            create_dir_all(parent).await?;
-        }
-        let file = File::create(&metadata.location).await?;
+    async fn init(metadata: FileMetadata) -> crate::Result<Self> {
+        let path = &metadata.location;
+        let file = match OpenOptions::new().write(true).read(true).open(path).await {
+            Ok(file) => {
+                debug!(?path, "GameFile already exists");
+                Some(file)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                debug!(?path, "GameFile not exists");
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
         Ok(Self { metadata, file })
     }
 
     #[instrument]
     async fn pull(&mut self) -> crate::Result<()> {
-        const BUF_SIZE: usize = 128 * 1024; // 128kb
-        let mut output = BufWriter::with_capacity(BUF_SIZE, &mut self.file);
+        const BUF_SIZE: usize = 32 * 1024; // 32kb
+
+        let file = match self.file.as_mut() {
+            Some(file) => file,
+            None => {
+                let path = &self.metadata.location;
+                if let Some(parent) = path.parent() {
+                    create_dir_all(parent).await?;
+                }
+                let file = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .await?;
+
+                debug!(?path, "Created new GameFile");
+                self.file.insert(file)
+            }
+        };
+        let mut output = BufWriter::with_capacity(BUF_SIZE, file);
         let mut response = reqwest::get(&self.metadata.remote_location).await?;
-        debug!(?response);
+        debug!(?response, "Remote GameFile responded");
         while let Some(chunk) = response.chunk().await? {
             trace!(len = chunk.len(), "New chunk arrived");
             output.write_all(&chunk).await?;
-            trace!(len = chunk.len(), "New chunk written");
         }
         output.flush().await?;
-        trace!("Rest flushed");
         Ok(())
     }
 }
@@ -67,7 +92,7 @@ pub struct FileStorage {
 
 impl FileStorage {
     #[instrument(skip(root_dir))]
-    pub async fn create_with_default_hierarchy(
+    pub async fn with_default_hierarchy(
         root_dir: impl AsRef<Path>,
         game_info: &GameInfo,
     ) -> crate::Result<Self> {
@@ -80,13 +105,14 @@ impl FileStorage {
             .libraries
             .iter()
             // TODO : Filter by rules and inspect name mb
+            .inspect(|lib| debug!(lib = lib.name.as_str(), "Remote library"))
             .map(|lib| &lib.resources)
             .filter_map(|LibraryResources { artifact, other }| {
                 let lib_res_to_game_file = |lib_res: &LibraryResource, file_type| FileMetadata {
                     location: libs_dir.join(&lib_res.path).into_boxed_path(),
                     remote_location: lib_res.resource.url.clone(),
-                    size: lib_res.resource.size,
-                    sha1: lib_res.resource.sha1.clone(),
+                    remote_size: lib_res.resource.size,
+                    remote_sha1: lib_res.resource.sha1.clone(),
                     file_type,
                 };
                 let artifact =
@@ -102,6 +128,7 @@ impl FileStorage {
         let binaries = game_info
             .downloads
             .iter()
+            .inspect(|(name, _)| debug!(%name, "Remote binary"))
             .map(|(name, Resource { sha1, url, size })| {
                 let filename = match name.as_str() {
                     "client" => "client.jar",
@@ -113,15 +140,15 @@ impl FileStorage {
                 FileMetadata {
                     location: bin_dir.join(filename).into_boxed_path(),
                     remote_location: url.clone(),
-                    size: *size,
-                    sha1: sha1.clone(),
+                    remote_size: *size,
+                    remote_sha1: sha1.clone(),
                     file_type: FileType::Binary,
                 }
             });
         // TODO : assets & log
 
         let files = stream::iter(binaries.chain(libraries))
-            .then(GameFile::create)
+            .then(GameFile::init)
             .try_collect()
             .await?;
 

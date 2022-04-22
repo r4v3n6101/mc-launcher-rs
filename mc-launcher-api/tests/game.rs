@@ -15,46 +15,40 @@ async fn download_latest_release() {
     let subscriber = Registry::default().with(telemetry);
     subscriber::set_global_default(subscriber).unwrap();
 
-    let root = info_span!("app_start");
-    async {
-        let metadata = info_span!("acquire_metadata");
-        let game_info: GameInfo = async {
-            let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            trace!(?manifest);
-            let last_release = manifest
-                .versions
-                .iter()
-                .find(|vinfo| vinfo.id == manifest.latest.release)
-                .unwrap();
-            reqwest::get(&last_release.url)
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap()
-        }
-        .instrument(metadata)
-        .await;
-
-        trace!(?game_info);
-
-        let download = info_span!("download_latest_release");
-        async {
-            let mut file_storage =
-                FileStorage::create_with_default_hierarchy(env!("OUT_DIR"), &game_info)
-                    .await
-                    .unwrap();
-            file_storage.force_pull_all(32).await.unwrap();
-        }
-        .instrument(download)
-        .await;
+    let metadata = info_span!("acquire_metadata");
+    let game_info: GameInfo = async {
+        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        trace!(?manifest);
+        let last_release = manifest
+            .versions
+            .iter()
+            .find(|vinfo| vinfo.id == manifest.latest.release)
+            .unwrap();
+        reqwest::get(&last_release.url)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
     }
-    .instrument(root)
+    .instrument(metadata)
+    .await;
+
+    trace!(?game_info);
+
+    let download = info_span!("download_latest_release");
+    async {
+        let mut file_storage = FileStorage::with_default_hierarchy(env!("OUT_DIR"), &game_info)
+            .await
+            .unwrap();
+        file_storage.force_pull_all(32).await.unwrap();
+    }
+    .instrument(download)
     .await;
 
     opentelemetry::global::shutdown_tracer_provider();
