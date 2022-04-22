@@ -13,9 +13,9 @@ use crate::metadata::game::{GameInfo, LibraryResource, LibraryResources, Resourc
 #[derive(Debug)]
 enum FileType {
     Asset,
-    Native,
     Artifact,
-    Binary,
+    NativeArtifact,
+    Client,
     Log,
 }
 
@@ -126,7 +126,7 @@ impl FileStorage {
         game_info: &GameInfo,
     ) -> crate::Result<Self> {
         let root_dir: Box<Path> = root_dir.as_ref().into();
-        let bin_dir = root_dir.join("bin/").join(&game_info.id);
+        let versions_dir = root_dir.join("versions/").join(&game_info.id);
         let libs_dir = root_dir.join("libs/");
         let _assets_dir = root_dir.join("assets/");
 
@@ -134,7 +134,7 @@ impl FileStorage {
             .libraries
             .iter()
             // TODO : Filter by rules and inspect name mb
-            .inspect(|lib| debug!(lib = %lib.name, "Remote library"))
+            .inspect(|lib| trace!(lib = %lib.name, "Remote library"))
             .map(|lib| &lib.resources)
             .filter_map(|LibraryResources { artifact, other }| {
                 let lib_res_to_game_file = |lib_res: &LibraryResource, file_type| FileMetadata {
@@ -149,7 +149,7 @@ impl FileStorage {
                 let other = other
                     .as_ref()?
                     .iter()
-                    .map(move |(_, value)| lib_res_to_game_file(value, FileType::Native));
+                    .map(move |(_, value)| lib_res_to_game_file(value, FileType::NativeArtifact));
                 Some(artifact.chain(other))
             })
             .flatten();
@@ -157,22 +157,14 @@ impl FileStorage {
         let binaries = game_info
             .downloads
             .iter()
-            .inspect(|(name, _)| debug!(%name, "Remote binary"))
-            .map(|(name, Resource { sha1, url, size })| {
-                let filename = match name.as_str() {
-                    "client" => "client.jar",
-                    "client_mappings" => "client_mappings.txt",
-                    "server" => "server.jar",
-                    "server_mappings" => "server_mappings.txt",
-                    _ => "unknown",
-                };
-                FileMetadata {
-                    location: bin_dir.join(filename).into_boxed_path(),
-                    remote_location: url.clone(),
-                    remote_size: *size,
-                    remote_sha1: sha1.clone(),
-                    file_type: FileType::Binary,
-                }
+            .filter_map(|(name, res)| if name == "client" { Some(res) } else { None })
+            .inspect(|_| trace!("Remote client file"))
+            .map(|Resource { sha1, url, size }| FileMetadata {
+                location: versions_dir.join("client.jar").into_boxed_path(),
+                remote_location: url.clone(),
+                remote_size: *size,
+                remote_sha1: sha1.clone(),
+                file_type: FileType::Client,
             });
         // TODO : assets & log
 
