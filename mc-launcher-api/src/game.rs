@@ -1,11 +1,12 @@
-use std::{io, iter, path::Path};
+use std::{fmt::Debug, io, iter, path::Path};
 
 use futures_util::{stream, StreamExt, TryStreamExt};
+use sha1::{Digest, Sha1};
 use tokio::{
-    fs::{create_dir_all, File, OpenOptions},
+    fs::{self, create_dir_all, File, OpenOptions},
     io::{AsyncWriteExt, BufWriter},
 };
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::metadata::game::{GameInfo, LibraryResource, LibraryResources, Resource};
 
@@ -39,16 +40,44 @@ impl GameFile {
         let path = &metadata.location;
         let file = match OpenOptions::new().write(true).read(true).open(path).await {
             Ok(file) => {
-                debug!(?path, "GameFile already exists");
+                info!("GameFile exists");
                 Some(file)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                debug!(?path, "GameFile not exists");
+                warn!("GameFile not exists");
                 None
             }
             Err(e) => return Err(e.into()),
         };
         Ok(Self { metadata, file })
+    }
+
+    #[instrument]
+    async fn check(&mut self) -> crate::Result<bool> {
+        if let Some(file) = &mut self.file {
+            let local_size = file.metadata().await?.len();
+            let remote_size = self.metadata.remote_size;
+            if local_size != remote_size as u64 {
+                warn!(local_size, remote_size, "File length mismatch");
+                return Ok(false);
+            }
+
+            let local_sha1 = hex::encode({
+                let filebuf = fs::read(&self.metadata.location).await?;
+                let mut hasher = Sha1::default();
+                hasher.update(&filebuf);
+                hasher.finalize()
+            });
+            let remote_sha1 = &self.metadata.remote_sha1;
+            if &local_sha1 != remote_sha1 {
+                warn!(%local_sha1, %remote_sha1, "File sha1sum mismatch");
+                return Ok(false);
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     #[instrument]
@@ -91,9 +120,9 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    #[instrument(skip(root_dir))]
+    #[instrument]
     pub async fn with_default_hierarchy(
-        root_dir: impl AsRef<Path>,
+        root_dir: impl AsRef<Path> + Debug,
         game_info: &GameInfo,
     ) -> crate::Result<Self> {
         let root_dir: Box<Path> = root_dir.as_ref().into();
@@ -105,7 +134,7 @@ impl FileStorage {
             .libraries
             .iter()
             // TODO : Filter by rules and inspect name mb
-            .inspect(|lib| debug!(lib = lib.name.as_str(), "Remote library"))
+            .inspect(|lib| debug!(lib = %lib.name, "Remote library"))
             .map(|lib| &lib.resources)
             .filter_map(|LibraryResources { artifact, other }| {
                 let lib_res_to_game_file = |lib_res: &LibraryResource, file_type| FileMetadata {
@@ -156,9 +185,16 @@ impl FileStorage {
     }
 
     #[instrument(skip(self))]
-    pub async fn force_pull_all(&mut self, concurrency: usize) -> crate::Result<()> {
+    pub async fn pull(&mut self, concurrency: usize, invalidate_all: bool) -> crate::Result<()> {
         stream::iter(&mut self.files)
             .map(Ok)
+            .try_filter_map(|game_file| async {
+                if invalidate_all || !game_file.check().await? {
+                    Ok(Some(game_file))
+                } else {
+                    Ok(None)
+                }
+            })
             .try_for_each_concurrent(concurrency, GameFile::pull)
             .await
     }

@@ -46,7 +46,7 @@ async fn download_latest_release() {
         let mut file_storage = FileStorage::with_default_hierarchy(env!("OUT_DIR"), &game_info)
             .await
             .unwrap();
-        file_storage.force_pull_all(32).await.unwrap();
+        file_storage.pull(32, false).await.unwrap();
     }
     .instrument(download)
     .await;
