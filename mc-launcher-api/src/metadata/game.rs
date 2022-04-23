@@ -63,7 +63,7 @@ pub struct Resource {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct AssetIndex {
+pub struct AssetIndexResource {
     #[serde(flatten)]
     pub resource: Resource,
     pub id: String,
@@ -122,7 +122,7 @@ pub struct JavaVersion {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct GameInfo {
+pub struct VersionInfo {
     pub id: String,
     #[serde(rename = "type")]
     pub release_type: ReleaseType,
@@ -131,7 +131,7 @@ pub struct GameInfo {
     pub time: DateTime<Utc>,
     pub libraries: Vec<Library>,
     pub downloads: HashMap<String, Resource>,
-    pub asset_index: AssetIndex,
+    pub asset_index: AssetIndexResource,
     pub assets: String,
     pub main_class: String,
     #[serde(flatten)]
@@ -141,3 +141,7 @@ pub struct GameInfo {
     pub logging: Option<Logging>,
     pub compliance_level: Option<usize>,
 }
+
+// TODO : chain arguments util
+// TODO : check rule
+//

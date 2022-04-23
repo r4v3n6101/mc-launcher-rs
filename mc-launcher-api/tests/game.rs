@@ -1,7 +1,9 @@
 use mc_launcher_api::{
-    game::FileStorage,
-    metadata::{game::GameInfo, manifest::VersionsManifest, resources::VERSIONS_MANIFEST_URL},
+    file::GameRepository,
+    metadata::{game::VersionInfo, manifest::VersionsManifest},
+    resources::{fetch_manifest, fetch_version_info},
 };
+use reqwest::Client;
 use tracing::{info_span, subscriber, trace, Instrument};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
@@ -16,37 +18,22 @@ async fn download_latest_release() {
     subscriber::set_global_default(subscriber).unwrap();
 
     let metadata = info_span!("acquire_metadata");
-    let game_info: GameInfo = async {
-        let manifest: VersionsManifest = reqwest::get(VERSIONS_MANIFEST_URL)
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let client = Client::new();
+    let version: VersionInfo = async {
+        let manifest: VersionsManifest = fetch_manifest(&client).await.unwrap();
         trace!(?manifest);
-        let last_release = manifest
-            .versions
-            .iter()
-            .find(|vinfo| vinfo.id == manifest.latest.release)
-            .unwrap();
-        reqwest::get(&last_release.url)
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap()
+        let last_release = manifest.latest_release().unwrap();
+        fetch_version_info(&client, &last_release).await.unwrap()
     }
     .instrument(metadata)
     .await;
 
-    trace!(?game_info);
+    trace!(?version);
 
     let download = info_span!("download_latest_release");
     async {
-        let mut file_storage = FileStorage::with_default_hierarchy(env!("OUT_DIR"), &game_info)
-            .await
-            .unwrap();
-        file_storage.pull(32, false).await.unwrap();
+        let mut file_storage = GameRepository::with_default_hierarchy(env!("OUT_DIR"), &version);
+        file_storage.pull_invalid(32, false).await.unwrap();
     }
     .instrument(download)
     .await;
