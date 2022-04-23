@@ -1,7 +1,7 @@
 use reqwest::Client;
 
 use crate::metadata::{
-    assets::{AssetIndex, AssetMetadata},
+    assets::AssetMetadata,
     game::VersionInfo,
     manifest::{Version, VersionsManifest},
 };
@@ -21,18 +21,6 @@ pub async fn fetch_manifest(client: &Client) -> crate::Result<VersionsManifest> 
 
 pub async fn fetch_version_info(client: &Client, version: &Version) -> crate::Result<VersionInfo> {
     Ok(client.get(&version.url).send().await?.json().await?)
-}
-
-pub async fn fetch_asset_index(
-    client: &Client,
-    version: &VersionInfo,
-) -> crate::Result<AssetIndex> {
-    Ok(client
-        .get(&version.asset_index.resource.url)
-        .send()
-        .await?
-        .json()
-        .await?)
 }
 
 pub fn get_asset_url(asset_metadata: &AssetMetadata) -> String {

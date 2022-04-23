@@ -161,17 +161,17 @@ impl GameRepository {
                 asset_index
             }
             _ => {
-                let asset_index_path = self
-                    .assets_dir
-                    .join(format!("indexes/{}.json", &self.version.asset_index.id));
-                download_if_absent(
+                let asset_index_resource = &self.version.asset_index;
+                let asset_index = FileIndex::fetch(
                     &self.client,
-                    &asset_index_path,
-                    &self.version.asset_index.resource.url,
+                    RemoteMetadata::from(&asset_index_resource.resource),
+                    self.assets_dir
+                        .join(format!("indexes/{}.json", &asset_index_resource.id)),
                     invalidate,
                 )
                 .await?;
-                let filebuf = fs::read(&asset_index_path).await?;
+
+                let filebuf = fs::read(&asset_index.location).await?;
                 let asset_index = serde_json::from_slice(&filebuf)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 info!(?asset_index, "Asset index downloaded");
