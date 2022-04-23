@@ -1,237 +1,307 @@
 use std::{
     fmt::Debug,
-    io, iter,
+    io,
     path::{Path, PathBuf},
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
-use sha1::{Digest, Sha1};
+use reqwest::Client;
 use tokio::{
-    fs::{create_dir_all, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
-    task,
+    fs::{self, create_dir_all, File},
+    io::{AsyncWriteExt, BufWriter},
 };
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace};
 
 use crate::{
     metadata::{
         assets::{AssetIndex, AssetMetadata},
-        game::{LibraryResource, LibraryResources, LoggerConfig, Resource, VersionInfo},
+        game::{LibraryResources, Resource, VersionInfo},
     },
     resources::get_asset_url,
 };
 
-#[derive(Debug, Clone, Copy)]
-enum FileType {
-    Asset,
-    AssetIndex,
-    Artifact,
-    NativeArtifact,
-    Client,
-    Log,
-}
+#[instrument]
+async fn download_if_absent(
+    client: &Client,
+    path: impl AsRef<Path> + Debug,
+    url: impl AsRef<str> + Debug,
+    force: bool,
+) -> crate::Result<()> {
+    const BUF_SIZE: usize = 1024 * 1024; //  1mb
 
-#[derive(Debug, Clone)]
-struct FileIndex {
-    remote_location: String,
-    remote_size: usize,
-    remote_sha1: String,
-    location: PathBuf,
-    ftype: FileType,
-}
-
-impl FileIndex {
-    fn from_remote(resource: &Resource, location: PathBuf, ftype: FileType) -> Self {
-        Self {
-            remote_location: resource.url.clone(),
-            remote_size: resource.size,
-            remote_sha1: resource.sha1.clone(),
-            location,
-            ftype,
-        }
-    }
-
-    #[instrument]
-    async fn validate(&self) -> crate::Result<bool> {
-        match OpenOptions::new().read(true).open(&self.location).await {
-            Ok(mut file) => {
-                info!("GameFile already exists");
-                let local_size = file.metadata().await?.len();
-                let remote_size = self.remote_size;
-                if local_size != remote_size as u64 {
-                    warn!(local_size, remote_size, "File length mismatch");
-                    return Ok(false);
-                }
-
-                let mut filebuf = Vec::with_capacity(remote_size);
-                file.read_to_end(&mut filebuf).await?;
-
-                let local_sha1 = task::spawn_blocking(move || {
-                    hex::encode({
-                        let mut hasher = Sha1::default();
-                        hasher.update(&filebuf);
-                        hasher.finalize()
-                    })
-                })
-                .await?;
-                let remote_sha1 = &self.remote_sha1;
-                if &local_sha1 != remote_sha1 {
-                    warn!(%local_sha1, %remote_sha1, "File sha1sum mismatch");
-                    return Ok(false);
-                }
-
-                Ok(true)
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                warn!("GameFile not exists");
-                Ok(false)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    #[instrument]
-    async fn pull(&self) -> crate::Result<()> {
-        const BUF_SIZE: usize = 32 * 1024; // 32kb
-
-        let path = &self.location;
+    let path = path.as_ref();
+    let url = url.as_ref();
+    if force || !path.exists() {
         if let Some(parent) = path.parent() {
             create_dir_all(parent).await?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(path)
-            .await?;
+        let file = File::create(path).await?;
         let mut output = BufWriter::with_capacity(BUF_SIZE, file);
-        let mut response = reqwest::get(&self.remote_location).await?;
-        debug!(?response, "Remote GameFile responded");
+        let mut response = client.get(url).send().await?;
+        debug!(?response, "Remote responded");
         while let Some(chunk) = response.chunk().await? {
             trace!(len = chunk.len(), "New chunk arrived");
             output.write_all(&chunk).await?;
         }
         output.flush().await?;
-        Ok(())
+        info!(?path, %url, "File downloaded");
+    } else {
+        info!(?path, "File already exists");
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RemoteMetadata {
+    location: String,
+    sha1: String,
+    size: usize,
+}
+
+impl From<&Resource> for RemoteMetadata {
+    fn from(res: &Resource) -> Self {
+        Self {
+            location: res.url.clone(),
+            sha1: res.sha1.clone(),
+            size: res.size,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FileIndex {
+    metadata: RemoteMetadata,
+    location: PathBuf,
+}
+
+impl FileIndex {
+    async fn fetch(
+        client: &Client,
+        metadata: RemoteMetadata,
+        location: PathBuf,
+        invalidate: bool,
+    ) -> crate::Result<Self> {
+        download_if_absent(client, &location, &metadata.location, invalidate).await?;
+        Ok(Self { metadata, location })
     }
 }
 
 pub struct GameRepository {
-    root_dir: Box<Path>,
-    indices: Vec<FileIndex>,
-    // TODO : arena for separate indices access (not looking all of them)
+    client: Client,
+    version: VersionInfo,
+
+    root_dir: PathBuf,
+    assets_dir: PathBuf,
+    libraries_dir: PathBuf,
+    logs_dir: PathBuf,
+    version_dir: PathBuf,
+
+    asset_index: Option<AssetIndex>,
+    log_config: Option<FileIndex>,
+    client_bin: Option<FileIndex>,
+    asset_objects: Vec<FileIndex>,
+    libraries: Vec<FileIndex>,
+    // natives?
 }
 
 impl GameRepository {
-    #[instrument(skip_all)]
-    pub fn with_default_hierarchy(
-        root_dir: impl AsRef<Path> + Debug,
-        version: &VersionInfo,
-        asset_index: &AssetIndex,
+    pub fn new(
+        client: Client,
+        assets_dir: PathBuf,
+        libraries_dir: PathBuf,
+        logs_dir: PathBuf,
+        version_dir: PathBuf,
+        root_dir: PathBuf,
+        version: VersionInfo,
     ) -> Self {
-        let root_dir: Box<Path> = root_dir.as_ref().into();
-        let versions_dir = root_dir.join("versions/").join(&version.id);
-        let libraries_dir = root_dir.join("libraries/");
-        let logs_dir = root_dir.join("logs/");
-        let legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-        let assets_dir = root_dir.join("assets/");
-        let assets_indices_dir = assets_dir.join("indexes/");
-        let assets_objects_dir = if legacy_assets {
-            assets_dir.join("virtual/legacy/")
-        } else {
-            assets_dir.join("objects/")
+        Self {
+            client,
+            version,
+
+            root_dir,
+            assets_dir,
+            libraries_dir,
+            logs_dir,
+            version_dir,
+
+            asset_index: None,
+            log_config: None,
+            client_bin: None,
+            asset_objects: vec![],
+            libraries: vec![],
+        }
+    }
+
+    pub fn with_default_hierarchy(client: Client, version: VersionInfo, root_dir: PathBuf) -> Self {
+        Self::new(
+            client,
+            root_dir.join("assets/"),
+            root_dir.join("libraries/"),
+            root_dir.join("logs/"),
+            root_dir.join(format!("versions/{}", &version.id)),
+            root_dir,
+            version,
+        )
+    }
+
+    pub fn with_default_location_and_client(version: VersionInfo) -> Self {
+        let root_dir = dirs::data_dir()
+            .map(|data| data.join("minecraft"))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
+            .expect("neither home nor data dirs found");
+        Self::with_default_hierarchy(Client::new(), version, root_dir)
+    }
+
+    // TODO : check flag for validation
+    #[instrument(skip(self))]
+    async fn fetch_assets(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+        let asset_index = match (&self.asset_index, invalidate) {
+            (Some(asset_index), false) => {
+                info!("Asset index already present");
+                asset_index
+            }
+            _ => {
+                let asset_index_path = self
+                    .assets_dir
+                    .join(format!("indexes/{}.json", &self.version.asset_index.id));
+                download_if_absent(
+                    &self.client,
+                    &asset_index_path,
+                    &self.version.asset_index.resource.url,
+                    invalidate,
+                )
+                .await?;
+                let filebuf = fs::read(&asset_index_path).await?;
+                let asset_index = serde_json::from_slice(&filebuf)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                info!(?asset_index, "Asset index downloaded");
+                self.asset_index.insert(asset_index)
+            }
         };
 
-        let libraries = version
-            .libraries
-            .iter()
-            // TODO : Filter by rules and inspect name mb
-            .map(|lib| &lib.resources)
-            .filter_map(|LibraryResources { artifact, other }| {
-                let lib_res_to_index = |&LibraryResource {
-                                            ref resource,
-                                            ref path,
-                                        },
-                                        ftype| {
-                    FileIndex::from_remote(&resource, libraries_dir.join(&path), ftype)
-                };
-                let artifact = iter::once(lib_res_to_index(artifact.as_ref()?, FileType::Artifact));
-                let other = other
-                    .as_ref()?
-                    .iter()
-                    .map(move |(_, value)| lib_res_to_index(value, FileType::NativeArtifact));
-                Some(artifact.chain(other))
-            })
-            .flatten();
-
-        let client = version
-            .downloads
-            .iter()
-            .filter_map(|(name, res)| if name == "client" { Some(res) } else { None })
-            .map(|resource| {
-                FileIndex::from_remote(&resource, versions_dir.join("client.dir"), FileType::Client)
-            });
-
-        let log_config = version.logging.iter().map(|l| &l.client.config).map(
-            |LoggerConfig { resource, id }| {
-                FileIndex::from_remote(&resource, logs_dir.join(&id), FileType::Log)
-            },
-        );
-
-        let assets_index = iter::once(FileIndex::from_remote(
-            &version.asset_index.resource,
-            assets_indices_dir.join(format!("{}.json", &version.asset_index.id)),
-            FileType::AssetIndex,
-        ));
-
-        let assets =
+        let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
+        self.asset_objects = stream::iter(
             asset_index
                 .objects
                 .iter()
-                .map(
-                    |(path, metadata @ AssetMetadata { hash, size })| FileIndex {
-                        location: assets_objects_dir.join(if legacy_assets {
-                            path.clone()
-                        } else {
-                            metadata.hashed_id()
-                        }),
-                        remote_location: get_asset_url(&metadata),
-                        remote_size: *size,
-                        remote_sha1: hash.clone(),
-                        ftype: FileType::Asset,
-                    },
-                );
+                .inspect(|entry| trace!(?entry, "Asset")),
+        )
+        .map(|(path, metadata @ AssetMetadata { hash, size })| {
+            FileIndex::fetch(
+                &self.client,
+                RemoteMetadata {
+                    location: get_asset_url(metadata),
+                    sha1: hash.clone(),
+                    size: *size,
+                },
+                self.assets_dir.join(if is_legacy_assets {
+                    format!("virtual/legacy/{path}")
+                } else {
+                    format!("object/{}", metadata.hashed_id())
+                }),
+                invalidate,
+            )
+        })
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
 
-        let indices = client
-            .chain(libraries)
-            .chain(log_config)
-            .chain(assets)
-            .chain(assets_index)
-            .inspect(|index| trace!(?index))
-            .collect();
-
-        Self { root_dir, indices }
+        Ok(())
     }
 
     #[instrument(skip(self))]
-    pub async fn pull_invalid(
-        &self,
-        concurrency: usize,
-        invalidate_all: bool,
+    async fn fetch_libraries(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+        let lib_resources = self
+            .version
+            .libraries
+            .iter()
+            // TODO : Filter by rules and inspect name mb
+            .inspect(|library| trace!(?library, "Library"))
+            .map(|lib| &lib.resources)
+            .flat_map(|LibraryResources { artifact, other }| {
+                other
+                    .iter()
+                    .flat_map(|other| other.iter().map(|(_, value)| value))
+                    .chain(artifact.iter())
+            });
+        self.libraries = stream::iter(lib_resources)
+            .map(|lib_res| {
+                FileIndex::fetch(
+                    &self.client,
+                    RemoteMetadata::from(&lib_res.resource),
+                    self.libraries_dir.join(&lib_res.path),
+                    invalidate,
+                )
+            })
+            .buffer_unordered(concurrency)
+            .try_collect()
+            .await?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn fetch_client(&mut self, invalidate: bool) -> crate::Result<()> {
+        let client_resource = self
+            .version
+            .downloads
+            .iter()
+            .inspect(|downloads| trace!(?downloads, "Downloads"))
+            .find_map(|(name, res)| if name == "client" { Some(res) } else { None });
+        self.client_bin = match client_resource {
+            Some(client_resource) => Some(
+                FileIndex::fetch(
+                    &self.client,
+                    RemoteMetadata::from(client_resource),
+                    self.version_dir.join("client.jar"),
+                    invalidate,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn fetch_log_config(&mut self, invalidate: bool) -> crate::Result<()> {
+        let log_config = self
+            .version
+            .logging
+            .as_ref()
+            // Unstable: .inspect(|logging| trace!(?logging, "Logging"))
+            .map(|logging| &logging.client.config);
+        self.log_config = match log_config {
+            Some(log_config) => Some(
+                FileIndex::fetch(
+                    &self.client,
+                    RemoteMetadata::from(&log_config.resource),
+                    self.logs_dir.join(&log_config.id),
+                    invalidate,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+
+        Ok(())
+    }
+
+    // concurrency
+    #[instrument(skip(self))]
+    pub async fn fetch_all(
+        &mut self,
+        assets_concurrency: usize,
+        libraries_concurrency: usize,
+        invalidate: bool,
     ) -> crate::Result<()> {
-        stream::iter(&self.indices)
-            .map(Ok)
-            .try_filter_map(|index| async move {
-                if invalidate_all || !index.validate().await? {
-                    Ok(Some(index.clone())) // clone index to pass to tokio as its 'static bound
-                } else {
-                    Ok(None)
-                }
-            })
-            .try_for_each_concurrent(concurrency, |index| async move {
-                task::spawn(async move { index.pull().await })
-                    .await
-                    .map_err(crate::Error::from)?
-            })
-            .await
+        self.fetch_assets(assets_concurrency, invalidate).await?;
+        self.fetch_libraries(libraries_concurrency, invalidate)
+            .await?;
+        self.fetch_client(invalidate).await?;
+        self.fetch_log_config(invalidate).await?;
+
+        Ok(())
     }
 }

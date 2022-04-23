@@ -1,6 +1,6 @@
 use mc_launcher_api::{
     file::GameRepository,
-    resources::{fetch_asset_index, fetch_manifest, fetch_version_info},
+    resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
 use tracing::{info_span, subscriber, Instrument};
@@ -21,13 +21,15 @@ async fn download_latest_release() {
     let manifest = fetch_manifest(&client).await.unwrap();
     let last_release = manifest.latest_release().unwrap();
     let version = fetch_version_info(&client, &last_release).await.unwrap();
-    let asset_index = fetch_asset_index(&client, &version).await.unwrap();
 
     let download = info_span!("download_latest_release");
     async {
-        let file_storage =
-            GameRepository::with_default_hierarchy(env!("OUT_DIR"), &version, &asset_index);
-        file_storage.pull_invalid(32, false).await.unwrap();
+        let mut file_storage = GameRepository::with_default_location_and_client(version);
+
+        // Assets are small, so more concurrent task will be efficient. Libraries are big and not
+        // efficient to processing with a lot of tasks as they will wait each other to download's
+        // end.
+        file_storage.fetch_all(128, 16, false).await.unwrap();
     }
     .instrument(download)
     .await;
