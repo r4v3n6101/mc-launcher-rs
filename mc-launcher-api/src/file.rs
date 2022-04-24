@@ -8,17 +8,32 @@ use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use tokio::{
     fs::{self, create_dir_all, File},
-    io::{AsyncWriteExt, BufWriter},
+    io::{AsyncWrite, AsyncWriteExt, BufWriter},
 };
 use tracing::{debug, info, instrument, trace};
 
 use crate::{
     metadata::{
         assets::{AssetIndex, AssetMetadata},
-        game::{LibraryResources, Resource, VersionInfo},
+        game::{Resource, VersionInfo},
     },
     resources::get_asset_url,
 };
+
+#[instrument(skip(writer))]
+async fn download<W: AsyncWrite + Unpin>(
+    client: &Client,
+    url: impl AsRef<str> + Debug,
+    writer: &mut W,
+) -> crate::Result<()> {
+    let mut response = client.get(url.as_ref()).send().await?;
+    debug!(?response, "Remote responded");
+    while let Some(chunk) = response.chunk().await? {
+        trace!(len = chunk.len(), "New chunk arrived");
+        writer.write_all(&chunk).await?;
+    }
+    Ok(())
+}
 
 #[instrument]
 async fn download_if_absent(
@@ -37,12 +52,7 @@ async fn download_if_absent(
         }
         let file = File::create(path).await?;
         let mut output = BufWriter::with_capacity(BUF_SIZE, file);
-        let mut response = client.get(url).send().await?;
-        debug!(?response, "Remote responded");
-        while let Some(chunk) = response.chunk().await? {
-            trace!(len = chunk.len(), "New chunk arrived");
-            output.write_all(&chunk).await?;
-        }
+        download(client, url, &mut output).await?;
         output.flush().await?;
         info!(?path, %url, "File downloaded");
     } else {
@@ -75,20 +85,13 @@ struct FileIndex {
 }
 
 impl FileIndex {
-    async fn fetch(
-        client: &Client,
-        metadata: RemoteMetadata,
-        location: PathBuf,
-        invalidate: bool,
-    ) -> crate::Result<Self> {
-        download_if_absent(client, &location, &metadata.location, invalidate).await?;
-        Ok(Self { metadata, location })
+    async fn fetch(&self, client: &Client, invalidate: bool) -> crate::Result<()> {
+        download_if_absent(client, &self.location, &self.metadata.location, invalidate).await
     }
 }
 
 pub struct GameRepository {
     client: Client,
-    version: VersionInfo,
 
     root_dir: PathBuf,
     assets_dir: PathBuf,
@@ -96,11 +99,11 @@ pub struct GameRepository {
     logs_dir: PathBuf,
     version_dir: PathBuf,
 
-    asset_index: Option<AssetIndex>,
+    asset_index: FileIndex,
+    client_bin: FileIndex,
     log_config: Option<FileIndex>,
-    client_bin: Option<FileIndex>,
-    asset_objects: Vec<FileIndex>,
     libraries: Vec<FileIndex>,
+    asset_objects: Vec<FileIndex>,
     // natives?
 }
 
@@ -112,11 +115,32 @@ impl GameRepository {
         logs_dir: PathBuf,
         version_dir: PathBuf,
         root_dir: PathBuf,
-        version: VersionInfo,
+        version: &VersionInfo,
     ) -> Self {
+        let asset_index = FileIndex {
+            metadata: RemoteMetadata::from(&version.asset_index.resource),
+            location: assets_dir.join(format!("indexes/{}.json", &version.asset_index.id)),
+        };
+        let client_bin = FileIndex {
+            metadata: RemoteMetadata::from(&version.downloads.client),
+            location: version_dir.join("client.jar"),
+        };
+        let log_config = version.logging.as_ref().map(|logging| FileIndex {
+            metadata: RemoteMetadata::from(&logging.client.config.resource),
+            location: logs_dir.join(&logging.client.config.id),
+        });
+        let libraries = version
+            .libraries
+            .iter()
+            // TODO : Filter by rules and inspect name mb
+            .filter_map(|lib| lib.resources.artifact.as_ref())
+            .map(|artifact| FileIndex {
+                metadata: RemoteMetadata::from(&artifact.resource),
+                location: libraries_dir.join(&artifact.path),
+            })
+            .collect();
         Self {
             client,
-            version,
 
             root_dir,
             assets_dir,
@@ -124,15 +148,19 @@ impl GameRepository {
             logs_dir,
             version_dir,
 
-            asset_index: None,
-            log_config: None,
-            client_bin: None,
+            asset_index,
+            client_bin,
+            log_config,
+            libraries,
             asset_objects: vec![],
-            libraries: vec![],
         }
     }
 
-    pub fn with_default_hierarchy(client: Client, version: VersionInfo, root_dir: PathBuf) -> Self {
+    pub fn with_default_hierarchy(
+        client: Client,
+        version: &VersionInfo,
+        root_dir: PathBuf,
+    ) -> Self {
         Self::new(
             client,
             root_dir.join("assets/"),
@@ -144,7 +172,7 @@ impl GameRepository {
         )
     }
 
-    pub fn with_default_location_and_client(version: VersionInfo) -> Self {
+    pub fn with_default_location_and_client(version: &VersionInfo) -> Self {
         let root_dir = dirs::data_dir()
             .map(|data| data.join("minecraft"))
             .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
@@ -152,139 +180,63 @@ impl GameRepository {
         Self::with_default_hierarchy(Client::new(), version, root_dir)
     }
 
+    #[instrument(skip(self))]
+    async fn track_asset_objects(&mut self, asset_index: &AssetIndex) -> crate::Result<()> {
+        let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
+        self.asset_objects = asset_index
+            .objects
+            .iter()
+            .map(
+                |(path, metadata @ AssetMetadata { hash, size })| FileIndex {
+                    metadata: RemoteMetadata {
+                        location: get_asset_url(metadata),
+                        sha1: hash.clone(),
+                        size: *size,
+                    },
+                    location: self.assets_dir.join(if is_legacy_assets {
+                        format!("virtual/legacy/{path}")
+                    } else {
+                        format!("object/{}", metadata.hashed_id())
+                    }),
+                },
+            )
+            .inspect(|index| debug!(?index, "Tracked asset object"))
+            .collect();
+        Ok(())
+    }
+
     // TODO : check flag for validation
     #[instrument(skip(self))]
     async fn fetch_assets(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
-        let asset_index = match (&self.asset_index, invalidate) {
-            (Some(asset_index), false) => {
-                info!("Asset index already present");
-                asset_index
-            }
-            _ => {
-                let asset_index_resource = &self.version.asset_index;
-                let asset_index = FileIndex::fetch(
-                    &self.client,
-                    RemoteMetadata::from(&asset_index_resource.resource),
-                    self.assets_dir
-                        .join(format!("indexes/{}.json", &asset_index_resource.id)),
-                    invalidate,
-                )
-                .await?;
-
-                let filebuf = fs::read(&asset_index.location).await?;
-                let asset_index = serde_json::from_slice(&filebuf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                info!(?asset_index, "Asset index downloaded");
-                self.asset_index.insert(asset_index)
-            }
-        };
-
-        let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-        self.asset_objects = stream::iter(
-            asset_index
-                .objects
-                .iter()
-                .inspect(|entry| trace!(?entry, "Asset")),
-        )
-        .map(|(path, metadata @ AssetMetadata { hash, size })| {
-            FileIndex::fetch(
-                &self.client,
-                RemoteMetadata {
-                    location: get_asset_url(metadata),
-                    sha1: hash.clone(),
-                    size: *size,
-                },
-                self.assets_dir.join(if is_legacy_assets {
-                    format!("virtual/legacy/{path}")
-                } else {
-                    format!("object/{}", metadata.hashed_id())
-                }),
-                invalidate,
-            )
-        })
-        .buffer_unordered(concurrency)
-        .try_collect()
-        .await?;
-
-        Ok(())
+        self.asset_index.fetch(&self.client, invalidate).await?;
+        let filebuf = fs::read(&self.asset_index.location).await?;
+        let asset_index: AssetIndex = serde_json::from_slice(&filebuf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.track_asset_objects(&asset_index).await?;
+        stream::iter(self.asset_objects.iter())
+            .map(Ok)
+            .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
+            .await
     }
 
     #[instrument(skip(self))]
     async fn fetch_libraries(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
-        let lib_resources = self
-            .version
-            .libraries
-            .iter()
-            // TODO : Filter by rules and inspect name mb
-            .inspect(|library| trace!(?library, "Library"))
-            .map(|lib| &lib.resources)
-            .flat_map(|LibraryResources { artifact, other }| {
-                other
-                    .iter()
-                    .flat_map(|other| other.iter().map(|(_, value)| value))
-                    .chain(artifact.iter())
-            });
-        self.libraries = stream::iter(lib_resources)
-            .map(|lib_res| {
-                FileIndex::fetch(
-                    &self.client,
-                    RemoteMetadata::from(&lib_res.resource),
-                    self.libraries_dir.join(&lib_res.path),
-                    invalidate,
-                )
-            })
-            .buffer_unordered(concurrency)
-            .try_collect()
-            .await?;
-
-        Ok(())
+        stream::iter(self.libraries.iter())
+            .map(Ok)
+            .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
+            .await
     }
 
     #[instrument(skip(self))]
     async fn fetch_client(&mut self, invalidate: bool) -> crate::Result<()> {
-        let client_resource = self
-            .version
-            .downloads
-            .iter()
-            .inspect(|downloads| trace!(?downloads, "Downloads"))
-            .find_map(|(name, res)| if name == "client" { Some(res) } else { None });
-        self.client_bin = match client_resource {
-            Some(client_resource) => Some(
-                FileIndex::fetch(
-                    &self.client,
-                    RemoteMetadata::from(client_resource),
-                    self.version_dir.join("client.jar"),
-                    invalidate,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-
-        Ok(())
+        self.client_bin.fetch(&self.client, invalidate).await
     }
 
     #[instrument(skip(self))]
     async fn fetch_log_config(&mut self, invalidate: bool) -> crate::Result<()> {
-        let log_config = self
-            .version
-            .logging
-            .as_ref()
-            // Unstable: .inspect(|logging| trace!(?logging, "Logging"))
-            .map(|logging| &logging.client.config);
-        self.log_config = match log_config {
-            Some(log_config) => Some(
-                FileIndex::fetch(
-                    &self.client,
-                    RemoteMetadata::from(&log_config.resource),
-                    self.logs_dir.join(&log_config.id),
-                    invalidate,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-
+        if let Some(index) = &self.log_config {
+            index.fetch(&self.client, invalidate).await?;
+        }
         Ok(())
     }
 

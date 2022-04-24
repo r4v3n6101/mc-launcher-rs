@@ -121,6 +121,12 @@ pub struct JavaVersion {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct Downloads {
+    pub client: Resource,
+    pub server: Option<Resource>,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionInfo {
     pub id: String,
@@ -130,7 +136,7 @@ pub struct VersionInfo {
     pub release_time: DateTime<Utc>,
     pub time: DateTime<Utc>,
     pub libraries: Vec<Library>,
-    pub downloads: HashMap<String, Resource>,
+    pub downloads: Downloads,
     pub asset_index: AssetIndexResource,
     pub assets: String,
     pub main_class: String,
