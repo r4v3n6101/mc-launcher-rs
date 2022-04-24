@@ -1,2 +1,4 @@
-# mc-launcher-rs
-Small MineCraft game launcher
+# mcl-rs
+- [ ] Write about API
+- [ ] Checkboxes what is does
+- [ ] Description

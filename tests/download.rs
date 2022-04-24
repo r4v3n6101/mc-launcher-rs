@@ -1,4 +1,4 @@
-use mc_launcher_api::{
+use mcl_rs::{
     file::GameRepository,
     resources::{fetch_manifest, fetch_version_info},
 };
