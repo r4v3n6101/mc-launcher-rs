@@ -1,8 +1,4 @@
-use std::{
-    fmt::Debug,
-    io,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Debug, io, path::PathBuf};
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
@@ -35,32 +31,6 @@ async fn download<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-#[instrument]
-async fn download_if_absent(
-    client: &Client,
-    path: impl AsRef<Path> + Debug,
-    url: impl AsRef<str> + Debug,
-    force: bool,
-) -> crate::Result<()> {
-    const BUF_SIZE: usize = 1024 * 1024; //  1mb
-
-    let path = path.as_ref();
-    let url = url.as_ref();
-    if force || !path.exists() {
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent).await?;
-        }
-        let file = File::create(path).await?;
-        let mut output = BufWriter::with_capacity(BUF_SIZE, file);
-        download(client, url, &mut output).await?;
-        output.flush().await?;
-        info!(?path, %url, "File downloaded");
-    } else {
-        info!(?path, "File already exists");
-    }
-    Ok(())
-}
-
 #[derive(Debug)]
 struct RemoteMetadata {
     location: String,
@@ -85,8 +55,24 @@ struct FileIndex {
 }
 
 impl FileIndex {
+    #[instrument]
     async fn fetch(&self, client: &Client, invalidate: bool) -> crate::Result<()> {
-        download_if_absent(client, &self.location, &self.metadata.location, invalidate).await
+        const BUF_SIZE: usize = 1024 * 1024; //  1mb
+
+        if invalidate || !self.location.exists() {
+            if let Some(parent) = self.location.parent() {
+                create_dir_all(parent).await?;
+            }
+            let file = File::create(&self.location).await?;
+            let mut output = BufWriter::with_capacity(BUF_SIZE, file);
+            download(client, &self.metadata.location, &mut output).await?;
+            output.flush().await?;
+            info!("File downloaded");
+        } else {
+            info!("File already exists");
+        }
+
+        Ok(())
     }
 }
 
@@ -180,8 +166,7 @@ impl GameRepository {
         Self::with_default_hierarchy(Client::new(), version, root_dir)
     }
 
-    #[instrument(skip(self))]
-    async fn track_asset_objects(&mut self, asset_index: &AssetIndex) -> crate::Result<()> {
+    fn track_asset_objects(&mut self, asset_index: &AssetIndex) {
         let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
         self.asset_objects = asset_index
             .objects
@@ -200,19 +185,18 @@ impl GameRepository {
                     }),
                 },
             )
-            .inspect(|index| debug!(?index, "Tracked asset object"))
             .collect();
-        Ok(())
     }
 
     // TODO : check flag for validation
     #[instrument(skip(self))]
     async fn fetch_assets(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+        let invalidate = invalidate || !self.assets_dir.exists();
         self.asset_index.fetch(&self.client, invalidate).await?;
         let filebuf = fs::read(&self.asset_index.location).await?;
         let asset_index: AssetIndex = serde_json::from_slice(&filebuf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.track_asset_objects(&asset_index).await?;
+        self.track_asset_objects(&asset_index);
         stream::iter(self.asset_objects.iter())
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
@@ -221,6 +205,7 @@ impl GameRepository {
 
     #[instrument(skip(self))]
     async fn fetch_libraries(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+        let invalidate = invalidate || !self.libraries_dir.exists();
         stream::iter(self.libraries.iter())
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
@@ -240,17 +225,12 @@ impl GameRepository {
         Ok(())
     }
 
-    // concurrency
     #[instrument(skip(self))]
-    pub async fn fetch_all(
-        &mut self,
-        assets_concurrency: usize,
-        libraries_concurrency: usize,
-        invalidate: bool,
-    ) -> crate::Result<()> {
-        self.fetch_assets(assets_concurrency, invalidate).await?;
-        self.fetch_libraries(libraries_concurrency, invalidate)
-            .await?;
+    pub async fn fetch_all(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+        // avg ratio of assets and libraries file sizes are 8, so assets should be 8 times concurrently
+        let invalidate = invalidate || !self.root_dir.exists();
+        self.fetch_assets(concurrency * 8, invalidate).await?;
+        self.fetch_libraries(concurrency, invalidate).await?;
         self.fetch_client(invalidate).await?;
         self.fetch_log_config(invalidate).await?;
 

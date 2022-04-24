@@ -28,8 +28,8 @@ async fn download_latest_release() {
 
         // Assets are small, so more concurrent task will be efficient. Libraries are big and not
         // efficient to processing with a lot of tasks as they will wait each other to download's
-        // end.
-        file_storage.fetch_all(128, 16, false).await.unwrap();
+        // end. That's why fetch_all will multiply concurrency for assets
+        file_storage.fetch_all(32, false).await.unwrap();
     }
     .instrument(download)
     .await;
