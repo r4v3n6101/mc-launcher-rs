@@ -6,7 +6,7 @@ use reqwest::Client;
 use tracing::{info_span, subscriber, Instrument};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn download_latest_release() {
     let tracer = opentelemetry_jaeger::new_pipeline()
         .with_service_name("mc-launcher-api")
