@@ -1,10 +1,11 @@
-use std::{fmt::Debug, io, path::PathBuf};
+use std::{fmt::Debug, io, path::PathBuf, sync::Arc};
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use tokio::{
     fs::{self, create_dir_all, File},
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
+    task,
 };
 use tracing::{debug, info, instrument, trace};
 
@@ -89,7 +90,6 @@ pub struct GameRepository {
     client_bin: FileIndex,
     log_config: Option<FileIndex>,
     libraries: Vec<FileIndex>,
-    asset_objects: Vec<FileIndex>,
     // natives?
 }
 
@@ -138,7 +138,6 @@ impl GameRepository {
             client_bin,
             log_config,
             libraries,
-            asset_objects: vec![],
         }
     }
 
@@ -166,9 +165,9 @@ impl GameRepository {
         Self::with_default_hierarchy(Client::new(), version, root_dir)
     }
 
-    fn track_asset_objects(&mut self, asset_index: &AssetIndex) {
+    fn track_asset_objects(&self, asset_index: &AssetIndex) -> Vec<FileIndex> {
         let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-        self.asset_objects = asset_index
+        asset_index
             .objects
             .iter()
             .map(
@@ -185,26 +184,26 @@ impl GameRepository {
                     }),
                 },
             )
-            .collect();
+            .collect()
     }
 
     // TODO : check flag for validation
     #[instrument(skip(self))]
-    async fn fetch_assets(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+    pub async fn fetch_assets(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
         let invalidate = invalidate || !self.assets_dir.exists();
         self.asset_index.fetch(&self.client, invalidate).await?;
         let filebuf = fs::read(&self.asset_index.location).await?;
         let asset_index: AssetIndex = serde_json::from_slice(&filebuf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.track_asset_objects(&asset_index);
-        stream::iter(self.asset_objects.iter())
+        let asset_objects = self.track_asset_objects(&asset_index);
+        stream::iter(asset_objects.iter())
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
             .await
     }
 
     #[instrument(skip(self))]
-    async fn fetch_libraries(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+    pub async fn fetch_libraries(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
         let invalidate = invalidate || !self.libraries_dir.exists();
         stream::iter(self.libraries.iter())
             .map(Ok)
@@ -213,12 +212,12 @@ impl GameRepository {
     }
 
     #[instrument(skip(self))]
-    async fn fetch_client(&mut self, invalidate: bool) -> crate::Result<()> {
+    pub async fn fetch_client(&self, invalidate: bool) -> crate::Result<()> {
         self.client_bin.fetch(&self.client, invalidate).await
     }
 
     #[instrument(skip(self))]
-    async fn fetch_log_config(&mut self, invalidate: bool) -> crate::Result<()> {
+    pub async fn fetch_log_config(&self, invalidate: bool) -> crate::Result<()> {
         if let Some(index) = &self.log_config {
             index.fetch(&self.client, invalidate).await?;
         }
@@ -226,13 +225,34 @@ impl GameRepository {
     }
 
     #[instrument(skip(self))]
-    pub async fn fetch_all(&mut self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+    pub async fn fetch_all(
+        self: Arc<Self>,
+        concurrency: usize,
+        invalidate: bool,
+    ) -> crate::Result<()> {
         // avg ratio of assets and libraries file sizes are 8, so assets should be 8 times concurrently
         let invalidate = invalidate || !self.root_dir.exists();
-        self.fetch_assets(concurrency * 8, invalidate).await?;
-        self.fetch_libraries(concurrency, invalidate).await?;
-        self.fetch_client(invalidate).await?;
-        self.fetch_log_config(invalidate).await?;
+        let assets_task = {
+            let selfie = Arc::clone(&self);
+            task::spawn(async move { selfie.fetch_assets(concurrency * 8, invalidate).await })
+        };
+        let libraries_task = {
+            let selfie = Arc::clone(&self);
+            task::spawn(async move { selfie.fetch_libraries(concurrency, invalidate).await })
+        };
+        let client_task = {
+            let selfie = Arc::clone(&self);
+            task::spawn(async move { selfie.fetch_client(invalidate).await })
+        };
+        let log_config = {
+            let selfie = Arc::clone(&self);
+            task::spawn(async move { selfie.fetch_log_config(invalidate).await })
+        };
+
+        assets_task.await??;
+        libraries_task.await??;
+        client_task.await??;
+        log_config.await??;
 
         Ok(())
     }

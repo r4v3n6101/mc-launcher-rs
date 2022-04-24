@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mcl_rs::{
     file::GameRepository,
     resources::{fetch_manifest, fetch_version_info},
@@ -24,7 +26,7 @@ async fn download_latest_release() {
 
     let download = info_span!("download_latest_release");
     async {
-        let mut file_storage = GameRepository::with_default_location_and_client(&version);
+        let file_storage = Arc::new(GameRepository::with_default_location_and_client(&version));
 
         // Assets are small, so more concurrent task will be efficient. Libraries are big and not
         // efficient to processing with a lot of tasks as they will wait each other to download's
