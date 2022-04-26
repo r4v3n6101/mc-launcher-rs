@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env::consts};
 
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
@@ -27,6 +27,9 @@ pub struct Rule {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct Rules(Vec<Rule>);
+
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum ArgumentValue {
     One(String),
@@ -37,10 +40,7 @@ pub enum ArgumentValue {
 #[serde(untagged)]
 pub enum Argument {
     Plain(String),
-    RuleSpecific {
-        value: ArgumentValue,
-        rules: Vec<Rule>,
-    },
+    RuleSpecific { value: ArgumentValue, rules: Rules },
 }
 
 #[derive(Deserialize, Debug)]
@@ -110,7 +110,7 @@ pub struct Library {
     #[serde(rename = "downloads")]
     pub resources: LibraryResources,
     pub name: String,
-    pub rules: Option<Vec<Rule>>,
+    pub rules: Option<Rules>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -148,6 +148,15 @@ pub struct VersionInfo {
     pub compliance_level: Option<usize>,
 }
 
-// TODO : chain arguments util
-// TODO : check rule
-//
+impl LibraryResources {
+    pub fn get_native_for_os(&self) -> Option<&LibraryResource> {
+        let native_str: &'static str = match consts::OS {
+            "macos" if consts::ARCH == "aarch64" => "natives-macos-arm64",
+            "linux" => "natives-linux",
+            "windows" => "natives-windows",
+            "macos" => "natives-macos",
+            _ => panic!("unsupported target"),
+        };
+        self.other.as_ref().and_then(|other| other.get(native_str))
+    }
+}

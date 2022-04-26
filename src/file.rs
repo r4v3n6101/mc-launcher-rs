@@ -7,7 +7,7 @@ use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
     task,
 };
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, info, instrument, trace, Instrument};
 
 use crate::{
     metadata::{
@@ -85,12 +85,13 @@ pub struct GameRepository {
     libraries_dir: PathBuf,
     logs_dir: PathBuf,
     version_dir: PathBuf,
+    natives_dir: PathBuf,
 
     asset_index: FileIndex,
     client_bin: FileIndex,
     log_config: Option<FileIndex>,
     libraries: Vec<FileIndex>,
-    // natives?
+    natives: Vec<String>,
 }
 
 impl GameRepository {
@@ -100,6 +101,7 @@ impl GameRepository {
         libraries_dir: PathBuf,
         logs_dir: PathBuf,
         version_dir: PathBuf,
+        natives_dir: PathBuf,
         root_dir: PathBuf,
         version: &VersionInfo,
     ) -> Self {
@@ -118,12 +120,19 @@ impl GameRepository {
         let libraries = version
             .libraries
             .iter()
-            // TODO : Filter by rules and inspect name mb
+            // TODO : Filter by rules
             .filter_map(|lib| lib.resources.artifact.as_ref())
             .map(|artifact| FileIndex {
                 metadata: RemoteMetadata::from(&artifact.resource),
                 location: libraries_dir.join(&artifact.path),
             })
+            .collect();
+        let natives = version
+            .libraries
+            .iter()
+            // TODO : Filter by rules
+            .filter_map(|lib| lib.resources.get_native_for_os())
+            .map(|artifact| artifact.resource.url.clone())
             .collect();
         Self {
             client,
@@ -133,11 +142,13 @@ impl GameRepository {
             libraries_dir,
             logs_dir,
             version_dir,
+            natives_dir,
 
             asset_index,
             client_bin,
             log_config,
             libraries,
+            natives,
         }
     }
 
@@ -146,12 +157,18 @@ impl GameRepository {
         version: &VersionInfo,
         root_dir: PathBuf,
     ) -> Self {
+        let assets_dir = root_dir.join("assets/");
+        let libraries_dir = root_dir.join("libraries/");
+        let logs_dir = root_dir.join("logs/");
+        let version_dir = root_dir.join(format!("versions/{}", &version.id));
+        let natives_dir = version_dir.join("natives/");
         Self::new(
             client,
-            root_dir.join("assets/"),
-            root_dir.join("libraries/"),
-            root_dir.join("logs/"),
-            root_dir.join(format!("versions/{}", &version.id)),
+            assets_dir,
+            libraries_dir,
+            logs_dir,
+            version_dir,
+            natives_dir,
             root_dir,
             version,
         )
@@ -178,7 +195,7 @@ impl GameRepository {
                         size: *size,
                     },
                     location: self.assets_dir.join(if is_legacy_assets {
-                        format!("virtual/legacy/{path}")
+                        format!("virtual/legacy/{}", path)
                     } else {
                         format!("object/{}", metadata.hashed_id())
                     }),
@@ -224,29 +241,40 @@ impl GameRepository {
         Ok(())
     }
 
+    pub async fn fetch_natives(&self) -> crate::Result<()> {
+        todo!()
+    }
+
     #[instrument(skip(self))]
     pub async fn fetch_all(
         self: Arc<Self>,
         concurrency: usize,
         invalidate: bool,
     ) -> crate::Result<()> {
-        // avg ratio of assets and libraries file sizes are 8, so assets should be 8 times concurrently
         let invalidate = invalidate || !self.root_dir.exists();
+
+        // avg ratio of assets and libraries file sizes are 8, so assets should be 8 times concurrently
         let assets_task = {
             let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_assets(concurrency * 8, invalidate).await })
+            task::spawn(
+                async move { selfie.fetch_assets(concurrency * 8, invalidate).await }
+                    .in_current_span(),
+            )
         };
         let libraries_task = {
             let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_libraries(concurrency, invalidate).await })
+            task::spawn(
+                async move { selfie.fetch_libraries(concurrency, invalidate).await }
+                    .in_current_span(),
+            )
         };
         let client_task = {
             let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_client(invalidate).await })
+            task::spawn(async move { selfie.fetch_client(invalidate).await }.in_current_span())
         };
         let log_config = {
             let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_log_config(invalidate).await })
+            task::spawn(async move { selfie.fetch_log_config(invalidate).await }.in_current_span())
         };
 
         assets_task.await??;
