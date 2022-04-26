@@ -1,4 +1,9 @@
-use std::{fmt::Debug, io, path::PathBuf, sync::Arc};
+use std::{
+    fmt::Debug,
+    io::{self, Cursor},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
@@ -7,7 +12,8 @@ use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
     task,
 };
-use tracing::{debug, info, instrument, trace, Instrument};
+use tracing::{debug, info, info_span, instrument, trace, Instrument};
+use zip::ZipArchive;
 
 use crate::{
     metadata::{
@@ -91,7 +97,7 @@ pub struct GameRepository {
     client_bin: FileIndex,
     log_config: Option<FileIndex>,
     libraries: Vec<FileIndex>,
-    natives: Vec<String>,
+    natives: Vec<RemoteMetadata>,
 }
 
 impl GameRepository {
@@ -132,7 +138,7 @@ impl GameRepository {
             .iter()
             // TODO : Filter by rules
             .filter_map(|lib| lib.resources.get_native_for_os())
-            .map(|artifact| artifact.resource.url.clone())
+            .map(|artifact| RemoteMetadata::from(&artifact.resource))
             .collect();
         Self {
             client,
@@ -152,11 +158,11 @@ impl GameRepository {
         }
     }
 
-    pub fn with_default_hierarchy(
-        client: Client,
-        version: &VersionInfo,
-        root_dir: PathBuf,
-    ) -> Self {
+    pub fn with_default_hierarchy(client: Client, version: &VersionInfo) -> Self {
+        let root_dir = dirs::data_dir()
+            .map(|data| data.join("minecraft"))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
+            .expect("neither home nor data dirs found");
         let assets_dir = root_dir.join("assets/");
         let libraries_dir = root_dir.join("libraries/");
         let logs_dir = root_dir.join("logs/");
@@ -172,14 +178,6 @@ impl GameRepository {
             root_dir,
             version,
         )
-    }
-
-    pub fn with_default_location_and_client(version: &VersionInfo) -> Self {
-        let root_dir = dirs::data_dir()
-            .map(|data| data.join("minecraft"))
-            .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
-            .expect("neither home nor data dirs found");
-        Self::with_default_hierarchy(Client::new(), version, root_dir)
     }
 
     fn track_asset_objects(&self, asset_index: &AssetIndex) -> Vec<FileIndex> {
@@ -204,9 +202,8 @@ impl GameRepository {
             .collect()
     }
 
-    // TODO : check flag for validation
     #[instrument(skip(self))]
-    pub async fn fetch_assets(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+    async fn fetch_assets(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
         let invalidate = invalidate || !self.assets_dir.exists();
         self.asset_index.fetch(&self.client, invalidate).await?;
         let filebuf = fs::read(&self.asset_index.location).await?;
@@ -220,7 +217,7 @@ impl GameRepository {
     }
 
     #[instrument(skip(self))]
-    pub async fn fetch_libraries(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
+    async fn fetch_libraries(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
         let invalidate = invalidate || !self.libraries_dir.exists();
         stream::iter(self.libraries.iter())
             .map(Ok)
@@ -229,22 +226,41 @@ impl GameRepository {
     }
 
     #[instrument(skip(self))]
-    pub async fn fetch_client(&self, invalidate: bool) -> crate::Result<()> {
-        self.client_bin.fetch(&self.client, invalidate).await
+    async fn fetch_natives(&self) -> crate::Result<()> {
+        for native_metadata in &self.natives {
+            let mut filebuf = Vec::with_capacity(native_metadata.size);
+            download(&self.client, &native_metadata.location, &mut filebuf).await?;
+            let natives_dir = self.natives_dir.clone();
+            // TODO : span here
+            task::spawn_blocking(move || {
+                let _span = info_span!("unzip").entered();
+                let mut cursor = Cursor::new(filebuf);
+                let mut native_artifact = ZipArchive::new(&mut cursor)?;
+                native_artifact.extract(natives_dir)
+            })
+            .await??;
+        }
+        Ok(())
     }
 
     #[instrument(skip(self))]
-    pub async fn fetch_log_config(&self, invalidate: bool) -> crate::Result<()> {
+    async fn fetch_bins(&self, invalidate: bool) -> crate::Result<()> {
+        self.client_bin.fetch(&self.client, invalidate).await?;
+        if invalidate || !self.version_dir.exists() || !self.natives_dir.exists() {
+            self.fetch_natives().await?;
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn fetch_log_config(&self, invalidate: bool) -> crate::Result<()> {
         if let Some(index) = &self.log_config {
             index.fetch(&self.client, invalidate).await?;
         }
         Ok(())
     }
 
-    pub async fn fetch_natives(&self) -> crate::Result<()> {
-        todo!()
-    }
-
+    // TODO : rempve invalidate flag and change to check
     #[instrument(skip(self))]
     pub async fn fetch_all(
         self: Arc<Self>,
@@ -270,7 +286,7 @@ impl GameRepository {
         };
         let client_task = {
             let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_client(invalidate).await }.in_current_span())
+            task::spawn(async move { selfie.fetch_bins(invalidate).await }.in_current_span())
         };
         let log_config = {
             let selfie = Arc::clone(&self);

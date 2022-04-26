@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use mcl_rs::{
     file::GameRepository,
@@ -18,7 +18,11 @@ async fn download_latest_release() {
     let subscriber = Registry::default().with(telemetry);
     subscriber::set_global_default(subscriber).unwrap();
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
 
     let manifest = fetch_manifest(&client).await.unwrap();
     let last_release = manifest.latest_release().unwrap();
@@ -26,7 +30,7 @@ async fn download_latest_release() {
 
     let download = info_span!("download_latest_release");
     async {
-        let file_storage = Arc::new(GameRepository::with_default_location_and_client(&version));
+        let file_storage = Arc::new(GameRepository::with_default_hierarchy(client, &version));
 
         // Assets are small, so more concurrent task will be efficient. Libraries are big and not
         // efficient to processing with a lot of tasks as they will wait each other to download's

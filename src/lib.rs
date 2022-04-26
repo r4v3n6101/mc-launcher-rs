@@ -10,10 +10,10 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
-    #[error("unknown version {0}")]
-    UnknownVersion(String),
     #[error(transparent)]
     TokioJoinError(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    ZipError(#[from] zip::result::ZipError),
 }
 
 pub type Result<T> = result::Result<T, Error>;
