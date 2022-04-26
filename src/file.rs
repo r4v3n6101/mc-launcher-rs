@@ -1,18 +1,18 @@
 use std::{
     fmt::Debug,
-    io::{self, Cursor},
-    path::PathBuf,
-    sync::Arc,
+    io::Cursor,
+    path::{Path, PathBuf},
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
+use sha1::{Digest, Sha1};
 use tokio::{
-    fs::{self, create_dir_all, File},
-    io::{AsyncWrite, AsyncWriteExt, BufWriter},
+    fs::{create_dir_all, File},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
     task,
 };
-use tracing::{debug, info, info_span, instrument, trace, Instrument};
+use tracing::{debug, info, instrument, trace};
 use zip::ZipArchive;
 
 use crate::{
@@ -56,17 +56,47 @@ impl From<&Resource> for RemoteMetadata {
 }
 
 #[derive(Debug)]
-struct FileIndex {
+struct Index {
     metadata: RemoteMetadata,
     location: PathBuf,
 }
 
-impl FileIndex {
+impl Index {
     #[instrument]
-    async fn fetch(&self, client: &Client, invalidate: bool) -> crate::Result<()> {
+    async fn is_match_to_remote(&self) -> crate::Result<bool> {
+        let mut file = File::open(&self.location).await?;
+
+        let metadata = file.metadata().await?;
+        let remote_size = self.metadata.size;
+        let local_size = metadata.len();
+        if local_size != remote_size as u64 {
+            return Ok(false);
+        }
+
+        let remote_sha1 = &self.metadata.sha1;
+        let local_sha1 = &hex::encode({
+            let mut filebuf = Vec::with_capacity(remote_size);
+            file.read_to_end(&mut filebuf).await?;
+
+            task::spawn_blocking(|| {
+                let mut sha1 = Sha1::new();
+                sha1.update(filebuf);
+                sha1.finalize()
+            })
+            .await?
+        });
+        if local_sha1 != remote_sha1 {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    #[instrument]
+    async fn pull(&self, client: &Client, validate: bool) -> crate::Result<()> {
         const BUF_SIZE: usize = 1024 * 1024; //  1mb
 
-        if invalidate || !self.location.exists() {
+        if !self.location.exists() || (validate && !self.is_match_to_remote().await?) {
             if let Some(parent) = self.location.parent() {
                 create_dir_all(parent).await?;
             }
@@ -83,57 +113,62 @@ impl FileIndex {
     }
 }
 
-pub struct GameRepository {
+pub struct Repository {
     client: Client,
-
-    root_dir: PathBuf,
-    assets_dir: PathBuf,
-    libraries_dir: PathBuf,
-    logs_dir: PathBuf,
-    version_dir: PathBuf,
+    indices: Vec<Index>,
+    /// they are treated as `indices`, but it's special case with zip archives
+    natives_indices: Vec<RemoteMetadata>,
     natives_dir: PathBuf,
-
-    asset_index: FileIndex,
-    client_bin: FileIndex,
-    log_config: Option<FileIndex>,
-    libraries: Vec<FileIndex>,
-    natives: Vec<RemoteMetadata>,
 }
 
-impl GameRepository {
-    pub fn new(
+impl Repository {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            indices: vec![],
+            natives_indices: vec![],
+            natives_dir: PathBuf::new(),
+        }
+    }
+
+    pub fn track_version_info(
         client: Client,
-        assets_dir: PathBuf,
-        libraries_dir: PathBuf,
-        logs_dir: PathBuf,
-        version_dir: PathBuf,
-        natives_dir: PathBuf,
-        root_dir: PathBuf,
+        assets_dir: &Path,
+        libraries_dir: &Path,
+        version_dir: &Path,
+        natives_dir: &Path,
         version: &VersionInfo,
     ) -> Self {
-        let asset_index = FileIndex {
+        // TODO : size
+        let mut indices = Vec::new();
+        indices.push(Index {
             metadata: RemoteMetadata::from(&version.asset_index.resource),
             location: assets_dir.join(format!("indexes/{}.json", &version.asset_index.id)),
-        };
-        let client_bin = FileIndex {
+        });
+        indices.push(Index {
             metadata: RemoteMetadata::from(&version.downloads.client),
             location: version_dir.join("client.jar"),
-        };
-        let log_config = version.logging.as_ref().map(|logging| FileIndex {
-            metadata: RemoteMetadata::from(&logging.client.config.resource),
-            location: logs_dir.join(&logging.client.config.id),
         });
-        let libraries = version
-            .libraries
-            .iter()
-            // TODO : Filter by rules
-            .filter_map(|lib| lib.resources.artifact.as_ref())
-            .map(|artifact| FileIndex {
-                metadata: RemoteMetadata::from(&artifact.resource),
-                location: libraries_dir.join(&artifact.path),
-            })
-            .collect();
-        let natives = version
+        if let Some(logging) = &version.logging {
+            indices.push(Index {
+                metadata: RemoteMetadata::from(&logging.client.config.resource),
+                location: version_dir.join(&logging.client.config.id),
+            });
+        }
+        indices.extend(
+            version
+                .libraries
+                .iter()
+                // TODO : Filter by rules
+                .filter_map(|lib| lib.resources.artifact.as_ref())
+                .map(|artifact| Index {
+                    metadata: RemoteMetadata::from(&artifact.resource),
+                    location: libraries_dir.join(&artifact.path),
+                }),
+        );
+        // Corner case where we can't store it like usual indices
+        // TODO : external method with unpacking
+        let natives_indices = version
             .libraries
             .iter()
             // TODO : Filter by rules
@@ -142,162 +177,58 @@ impl GameRepository {
             .collect();
         Self {
             client,
-
-            root_dir,
-            assets_dir,
-            libraries_dir,
-            logs_dir,
-            version_dir,
-            natives_dir,
-
-            asset_index,
-            client_bin,
-            log_config,
-            libraries,
-            natives,
+            indices,
+            natives_indices,
+            natives_dir: natives_dir.to_path_buf(),
         }
     }
 
-    pub fn with_default_hierarchy(client: Client, version: &VersionInfo) -> Self {
-        let root_dir = dirs::data_dir()
-            .map(|data| data.join("minecraft"))
-            .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
-            .expect("neither home nor data dirs found");
-        let assets_dir = root_dir.join("assets/");
-        let libraries_dir = root_dir.join("libraries/");
-        let logs_dir = root_dir.join("logs/");
-        let version_dir = root_dir.join(format!("versions/{}", &version.id));
-        let natives_dir = version_dir.join("natives/");
-        Self::new(
-            client,
-            assets_dir,
-            libraries_dir,
-            logs_dir,
-            version_dir,
-            natives_dir,
-            root_dir,
-            version,
-        )
-    }
-
-    fn track_asset_objects(&self, asset_index: &AssetIndex) -> Vec<FileIndex> {
+    pub fn track_asset_index(client: Client, assets_dir: &Path, asset_index: &AssetIndex) -> Self {
         let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-        asset_index
+        let indices = asset_index
             .objects
             .iter()
-            .map(
-                |(path, metadata @ AssetMetadata { hash, size })| FileIndex {
-                    metadata: RemoteMetadata {
-                        location: get_asset_url(metadata),
-                        sha1: hash.clone(),
-                        size: *size,
-                    },
-                    location: self.assets_dir.join(if is_legacy_assets {
-                        format!("virtual/legacy/{}", path)
-                    } else {
-                        format!("object/{}", metadata.hashed_id())
-                    }),
+            .map(|(path, metadata @ AssetMetadata { hash, size })| Index {
+                metadata: RemoteMetadata {
+                    location: get_asset_url(metadata),
+                    sha1: hash.clone(),
+                    size: *size,
                 },
-            )
-            .collect()
-    }
-
-    #[instrument(skip(self))]
-    async fn fetch_assets(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
-        let invalidate = invalidate || !self.assets_dir.exists();
-        self.asset_index.fetch(&self.client, invalidate).await?;
-        let filebuf = fs::read(&self.asset_index.location).await?;
-        let asset_index: AssetIndex = serde_json::from_slice(&filebuf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let asset_objects = self.track_asset_objects(&asset_index);
-        stream::iter(asset_objects.iter())
-            .map(Ok)
-            .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
-            .await
-    }
-
-    #[instrument(skip(self))]
-    async fn fetch_libraries(&self, concurrency: usize, invalidate: bool) -> crate::Result<()> {
-        let invalidate = invalidate || !self.libraries_dir.exists();
-        stream::iter(self.libraries.iter())
-            .map(Ok)
-            .try_for_each_concurrent(concurrency, |index| index.fetch(&self.client, invalidate))
-            .await
-    }
-
-    #[instrument(skip(self))]
-    async fn fetch_natives(&self) -> crate::Result<()> {
-        for native_metadata in &self.natives {
-            let mut filebuf = Vec::with_capacity(native_metadata.size);
-            download(&self.client, &native_metadata.location, &mut filebuf).await?;
-            let natives_dir = self.natives_dir.clone();
-            // TODO : span here
-            task::spawn_blocking(move || {
-                let _span = info_span!("unzip").entered();
-                let mut cursor = Cursor::new(filebuf);
-                let mut native_artifact = ZipArchive::new(&mut cursor)?;
-                native_artifact.extract(natives_dir)
+                location: assets_dir.join(if is_legacy_assets {
+                    format!("virtual/legacy/{}", path)
+                } else {
+                    format!("object/{}", metadata.hashed_id())
+                }),
             })
-            .await??;
+            .collect();
+        Self {
+            client,
+            indices,
+            natives_indices: vec![],
+            natives_dir: PathBuf::new(),
         }
-        Ok(())
     }
 
     #[instrument(skip(self))]
-    async fn fetch_bins(&self, invalidate: bool) -> crate::Result<()> {
-        self.client_bin.fetch(&self.client, invalidate).await?;
-        if invalidate || !self.version_dir.exists() || !self.natives_dir.exists() {
-            self.fetch_natives().await?;
+    pub async fn pull_files(&self, concurrency: usize, validate: bool) -> crate::Result<()> {
+        stream::iter(self.indices.iter())
+            .map(Ok)
+            .try_for_each_concurrent(concurrency, |index| index.pull(&self.client, validate))
+            .await?;
+        if validate {
+            for native_metadata in &self.natives_indices {
+                let mut filebuf = Vec::with_capacity(native_metadata.size);
+                download(&self.client, &native_metadata.location, &mut filebuf).await?;
+                let natives_dir = self.natives_dir.clone();
+                // TODO : span here
+                task::spawn_blocking(move || {
+                    let mut cursor = Cursor::new(filebuf);
+                    let mut native_artifact = ZipArchive::new(&mut cursor)?;
+                    native_artifact.extract(natives_dir)
+                })
+                .await??;
+            }
         }
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn fetch_log_config(&self, invalidate: bool) -> crate::Result<()> {
-        if let Some(index) = &self.log_config {
-            index.fetch(&self.client, invalidate).await?;
-        }
-        Ok(())
-    }
-
-    // TODO : rempve invalidate flag and change to check
-    #[instrument(skip(self))]
-    pub async fn fetch_all(
-        self: Arc<Self>,
-        concurrency: usize,
-        invalidate: bool,
-    ) -> crate::Result<()> {
-        let invalidate = invalidate || !self.root_dir.exists();
-
-        // avg ratio of assets and libraries file sizes are 8, so assets should be 8 times concurrently
-        let assets_task = {
-            let selfie = Arc::clone(&self);
-            task::spawn(
-                async move { selfie.fetch_assets(concurrency * 8, invalidate).await }
-                    .in_current_span(),
-            )
-        };
-        let libraries_task = {
-            let selfie = Arc::clone(&self);
-            task::spawn(
-                async move { selfie.fetch_libraries(concurrency, invalidate).await }
-                    .in_current_span(),
-            )
-        };
-        let client_task = {
-            let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_bins(invalidate).await }.in_current_span())
-        };
-        let log_config = {
-            let selfie = Arc::clone(&self);
-            task::spawn(async move { selfie.fetch_log_config(invalidate).await }.in_current_span())
-        };
-
-        assets_task.await??;
-        libraries_task.await??;
-        client_task.await??;
-        log_config.await??;
-
         Ok(())
     }
 }

@@ -1,10 +1,9 @@
-use std::{sync::Arc, time::Duration};
-
 use mcl_rs::{
-    file::GameRepository,
+    file::Repository,
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
+use tokio::fs;
 use tracing::{info_span, subscriber, Instrument};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
@@ -18,24 +17,40 @@ async fn download_latest_release() {
     let subscriber = Registry::default().with(telemetry);
     subscriber::set_global_default(subscriber).unwrap();
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-        .unwrap();
+    let client = Client::new();
 
     let manifest = fetch_manifest(&client).await.unwrap();
     let last_release = manifest.latest_release().unwrap();
     let version = fetch_version_info(&client, &last_release).await.unwrap();
 
     let download = info_span!("download_latest_release");
+    let gamedir = dirs::data_dir()
+        .map(|data| data.join("minecraft"))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
+        .expect("neither home nor data dirs found");
+    let assets_dir = gamedir.join("assets/");
+    let libraries_dir = gamedir.join("libraries/");
+    let version_dir = gamedir.join(format!("versions/{}", &version.id));
+    let natives_dir = version_dir.join("natives/");
     async {
-        let file_storage = Arc::new(GameRepository::with_default_hierarchy(client, &version));
+        let gamefiles = Repository::track_version_info(
+            client.clone(),
+            assets_dir.as_path(),
+            libraries_dir.as_path(),
+            version_dir.as_path(),
+            natives_dir.as_path(),
+            &version,
+        );
+        gamefiles.pull_files(32, false).await.unwrap();
 
-        // Assets are small, so more concurrent task will be efficient. Libraries are big and not
-        // efficient to processing with a lot of tasks as they will wait each other to download's
-        // end. That's why fetch_all will multiply concurrency for assets
-        file_storage.fetch_all(32, false).await.unwrap();
+        let asset_index = fs::read(assets_dir.join(format!("indexes/{}.json", &version.assets)))
+            .await
+            .unwrap();
+        let asset_index = serde_json::from_slice(&asset_index).unwrap();
+        let assets =
+            Repository::track_asset_index(client.clone(), assets_dir.as_path(), &asset_index);
+
+        assets.pull_files(128, false).await.unwrap();
     }
     .instrument(download)
     .await;
