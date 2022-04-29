@@ -33,15 +33,11 @@ async fn download_latest_release() {
     let version_dir = gamedir.join(format!("versions/{}", &version.id));
     let natives_dir = version_dir.join("natives/");
     async {
-        let repository = Repository::new(
-            Manager::default(),
-            assets_dir.as_path(),
-            libraries_dir.as_path(),
-            version_dir.as_path(),
-            natives_dir.as_path(),
-            &version,
-        );
-        repository.pull_indices(32).await.unwrap();
+        let mut repository = Repository::new(Manager::default());
+        repository.track_libraries(libraries_dir.as_path(), natives_dir.as_path(), &version);
+        repository.track_client(version_dir.as_path(), &version);
+        repository.track_assets(assets_dir.as_path(), &version);
+        repository.pull_indices(128).await.unwrap();
     }
     .instrument(download)
     .await;

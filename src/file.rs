@@ -6,11 +6,7 @@ use std::{
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use sha1::{Digest, Sha1};
-use tokio::{
-    fs::{self, File},
-    io::AsyncReadExt,
-    task,
-};
+use tokio::{fs, task};
 use tracing::instrument;
 use zip::ZipArchive;
 
@@ -33,17 +29,14 @@ async fn validate_file(
     if !path.exists() {
         return Ok(false);
     }
-    let mut file = File::open(path).await?;
 
-    let metadata = file.metadata().await?;
+    let metadata = fs::metadata(path).await?;
     if metadata.len() != expected_size {
         return Ok(false);
     }
 
     let local_sha1 = &hex::encode({
-        let mut filebuf = Vec::with_capacity(expected_size as usize);
-        file.read_to_end(&mut filebuf).await?;
-
+        let filebuf = fs::read(path).await?;
         task::spawn_blocking(|| {
             let mut sha1 = Sha1::new();
             sha1.update(filebuf);
@@ -153,34 +146,42 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(
-        downloader: Manager,
-        assets_dir: &Path,
+    pub fn new(downloader: Manager) -> Self {
+        Self {
+            downloader,
+            indices: vec![],
+        }
+    }
+
+    pub fn downloader(&self) -> &Manager {
+        &self.downloader
+    }
+
+    pub fn purge(&mut self) {
+        self.indices.clear();
+    }
+
+    pub fn track_assets(&mut self, assets_dir: &Path, version: &VersionInfo) {
+        self.indices.push(Index {
+            metadata: RemoteMetadata::from(&version.asset_index.resource),
+            itype: IndexType::AssetIndex {
+                id: version.assets.clone(),
+                assets_dir: assets_dir.to_path_buf(),
+            },
+        });
+    }
+
+    pub fn track_libraries(
+        &mut self,
         libraries_dir: &Path,
-        version_dir: &Path,
         natives_dir: &Path,
         version: &VersionInfo,
-    ) -> Self {
-        let mut indices = vec![
-            Index {
-                metadata: RemoteMetadata::from(&version.asset_index.resource),
-                itype: IndexType::AssetIndex {
-                    id: version.assets.clone(),
-                    assets_dir: assets_dir.to_path_buf(),
-                },
-            },
-            Index {
-                metadata: RemoteMetadata::from(&version.downloads.client),
-                itype: IndexType::GameFile {
-                    path: version_dir.join("client.jar"),
-                },
-            },
-        ];
+    ) {
         for lib in &version.libraries {
             if lib.is_supported_by_rules() {
                 let resources = &lib.resources;
                 if let Some(artifact) = &resources.artifact {
-                    indices.push(Index {
+                    self.indices.push(Index {
                         metadata: RemoteMetadata::from(&artifact.resource),
                         itype: IndexType::GameFile {
                             path: libraries_dir.join(&artifact.path),
@@ -188,7 +189,7 @@ impl Repository {
                     });
                 }
                 if let Some(native_artifact) = resources.get_native_for_os() {
-                    indices.push(Index {
+                    self.indices.push(Index {
                         metadata: RemoteMetadata::from(&native_artifact.resource),
                         itype: IndexType::NativeArtifact {
                             natives_dir: natives_dir.to_path_buf(),
@@ -197,18 +198,22 @@ impl Repository {
                 }
             }
         }
+    }
+
+    pub fn track_client(&mut self, version_dir: &Path, version: &VersionInfo) {
+        self.indices.push(Index {
+            metadata: RemoteMetadata::from(&version.downloads.client),
+            itype: IndexType::GameFile {
+                path: version_dir.join("client.jar"),
+            },
+        });
         if let Some(logging) = &version.logging {
-            indices.push(Index {
+            self.indices.push(Index {
                 metadata: RemoteMetadata::from(&logging.client.config.resource),
                 itype: IndexType::GameFile {
                     path: version_dir.join(&logging.client.config.id),
                 },
             });
-        }
-
-        Self {
-            downloader,
-            indices,
         }
     }
 
