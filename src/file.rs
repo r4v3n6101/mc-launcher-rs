@@ -71,7 +71,6 @@ impl From<&Resource> for RemoteMetadata {
 #[derive(Debug)]
 enum IndexType {
     GameFile { path: PathBuf },
-    AssetIndex { id: String, assets_dir: PathBuf },
     NativeArtifact { natives_dir: PathBuf },
 }
 
@@ -88,35 +87,6 @@ impl Index {
             IndexType::GameFile { path } => {
                 if !validate_file(&path, &self.metadata.sha1, self.metadata.size).await? {
                     downloader.download_file(&self.metadata.url, &path).await?;
-                }
-            }
-            IndexType::AssetIndex { id, assets_dir } => {
-                let asset_index_path = assets_dir.join(format!("indexes/{}.json", id));
-                if !validate_file(&asset_index_path, &self.metadata.sha1, self.metadata.size)
-                    .await?
-                {
-                    downloader
-                        .download_file(&self.metadata.url, &asset_index_path)
-                        .await?;
-                }
-                let asset_index: AssetIndex = {
-                    let filebuf = fs::read(&asset_index_path).await?;
-                    serde_json::from_slice(&filebuf)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                };
-                let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-                for (path, metadata @ AssetMetadata { hash, size }) in &asset_index.objects {
-                    let obj_path = assets_dir.join(if is_legacy_assets {
-                        format!("virtual/legacy/{}", path)
-                    } else {
-                        format!("objects/{}", metadata.hashed_id())
-                    });
-
-                    if !validate_file(&obj_path, hash, *size).await? {
-                        downloader
-                            .download_file(get_asset_url(metadata), &obj_path)
-                            .await?;
-                    }
                 }
             }
             IndexType::NativeArtifact { natives_dir } => {
@@ -161,14 +131,45 @@ impl Repository {
         self.indices.clear();
     }
 
-    pub fn track_assets(&mut self, assets_dir: &Path, version: &VersionInfo) {
-        self.indices.push(Index {
+    pub async fn track_asset_objects(
+        &mut self,
+        assets_dir: &Path,
+        version: &VersionInfo,
+    ) -> crate::Result<()> {
+        let asset_index_path = assets_dir.join(format!("indexes/{}.json", version.assets));
+
+        let asset_index = Index {
             metadata: RemoteMetadata::from(&version.asset_index.resource),
-            itype: IndexType::AssetIndex {
-                id: version.assets.clone(),
-                assets_dir: assets_dir.to_path_buf(),
+            itype: IndexType::GameFile {
+                path: asset_index_path.clone(),
             },
-        });
+        };
+        asset_index.pull(&self.downloader).await?;
+
+        let asset_index: AssetIndex = {
+            let filebuf = fs::read(&asset_index_path).await?;
+            serde_json::from_slice(&filebuf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        };
+        let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
+
+        for (path, metadata @ AssetMetadata { hash, size }) in &asset_index.objects {
+            self.indices.push(Index {
+                metadata: RemoteMetadata {
+                    url: get_asset_url(metadata),
+                    sha1: hash.clone(),
+                    size: *size,
+                },
+                itype: IndexType::GameFile {
+                    path: assets_dir.join(if is_legacy_assets {
+                        format!("virtual/legacy/{}", path)
+                    } else {
+                        format!("objects/{}", metadata.hashed_id())
+                    }),
+                },
+            });
+        }
+        Ok(())
     }
 
     pub fn track_libraries(

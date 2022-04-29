@@ -38,7 +38,10 @@ async fn download_latest_release() {
         let mut repository = Repository::new(Manager::default());
         repository.track_libraries(libraries_dir.as_path(), natives_dir.as_path(), &version);
         repository.track_client(version_dir.as_path(), &version);
-        repository.track_assets(assets_dir.as_path(), &version);
+        repository
+            .track_asset_objects(assets_dir.as_path(), &version)
+            .await
+            .unwrap();
         repository.pull_indices(128).await.unwrap();
     }
     .instrument(download)
