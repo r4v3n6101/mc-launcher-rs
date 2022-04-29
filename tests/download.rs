@@ -42,7 +42,7 @@ async fn download_latest_release() {
             .track_asset_objects(assets_dir.as_path(), &version)
             .await
             .unwrap();
-        repository.pull_indices(128).await.unwrap();
+        repository.pull_indices(512).await.unwrap();
         assert_eq!(repository.pulled_indices(), repository.indices());
     }
     .instrument(download)
