@@ -205,7 +205,7 @@ impl Rule {
 
 impl Rules {
     pub fn is_allowed(&self, params: &HashMap<&str, bool>) -> bool {
-        self.0.iter().any(|rule| rule.is_allowed(params))
+        !self.0.iter().any(|rule| !rule.is_allowed(params))
     }
 }
 
@@ -260,7 +260,7 @@ impl Library {
         self.rules
             .as_ref()
             .map(|rules| rules.is_allowed(&HashMap::new()))
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 }
 

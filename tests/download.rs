@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use mcl_rs::{
     download::Manager,
     file::Repository,
@@ -41,6 +43,21 @@ async fn download_latest_release() {
     }
     .instrument(download)
     .await;
+
+    let features = HashMap::new();
+    let jvm_args = version
+        .arguments
+        .iter_jvm_args(&features)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let game_args = version
+        .arguments
+        .iter_game_args(&features)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    println!("JVM args: {}", jvm_args);
+    println!("Game args: {}", game_args);
 
     opentelemetry::global::shutdown_tracer_provider();
 }
