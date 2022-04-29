@@ -1,9 +1,9 @@
 use mcl_rs::{
+    download::Manager,
     file::Repository,
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
-use tokio::fs;
 use tracing::{info_span, subscriber, Instrument};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
@@ -33,24 +33,15 @@ async fn download_latest_release() {
     let version_dir = gamedir.join(format!("versions/{}", &version.id));
     let natives_dir = version_dir.join("natives/");
     async {
-        let gamefiles = Repository::track_version_info(
-            client.clone(),
+        let repository = Repository::new(
+            Manager::default(),
             assets_dir.as_path(),
             libraries_dir.as_path(),
             version_dir.as_path(),
             natives_dir.as_path(),
             &version,
         );
-        gamefiles.pull_files(32, false).await.unwrap();
-
-        let asset_index = fs::read(assets_dir.join(format!("indexes/{}.json", &version.assets)))
-            .await
-            .unwrap();
-        let asset_index = serde_json::from_slice(&asset_index).unwrap();
-        let assets =
-            Repository::track_asset_index(client.clone(), assets_dir.as_path(), &asset_index);
-
-        assets.pull_files(128, false).await.unwrap();
+        repository.pull_indices(32).await.unwrap();
     }
     .instrument(download)
     .await;

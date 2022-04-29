@@ -1,21 +1,21 @@
 use std::{
     fmt::Debug,
-    io::Cursor,
+    io::{self, Cursor},
     path::{Path, PathBuf},
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
-use reqwest::Client;
 use sha1::{Digest, Sha1};
 use tokio::{
-    fs::{create_dir_all, File},
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
+    fs::{self, File},
+    io::AsyncReadExt,
     task,
 };
-use tracing::{debug, info, instrument, trace};
+use tracing::instrument;
 use zip::ZipArchive;
 
 use crate::{
+    download::Manager,
     metadata::{
         assets::{AssetIndex, AssetMetadata},
         game::{Resource, VersionInfo},
@@ -23,32 +23,52 @@ use crate::{
     resources::get_asset_url,
 };
 
-#[instrument(skip(writer))]
-async fn download<W: AsyncWrite + Unpin>(
-    client: &Client,
-    url: impl AsRef<str> + Debug,
-    writer: &mut W,
-) -> crate::Result<()> {
-    let mut response = client.get(url.as_ref()).send().await?;
-    debug!(?response, "Remote responded");
-    while let Some(chunk) = response.chunk().await? {
-        trace!(len = chunk.len(), "New chunk arrived");
-        writer.write_all(&chunk).await?;
+#[instrument]
+async fn validate_file(
+    path: impl AsRef<Path> + Debug,
+    expected_sha1: &str,
+    expected_size: u64,
+) -> crate::Result<bool> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(false);
     }
-    Ok(())
+    let mut file = File::open(path).await?;
+
+    let metadata = file.metadata().await?;
+    if metadata.len() != expected_size {
+        return Ok(false);
+    }
+
+    let local_sha1 = &hex::encode({
+        let mut filebuf = Vec::with_capacity(expected_size as usize);
+        file.read_to_end(&mut filebuf).await?;
+
+        task::spawn_blocking(|| {
+            let mut sha1 = Sha1::new();
+            sha1.update(filebuf);
+            sha1.finalize()
+        })
+        .await?
+    });
+    if local_sha1 != expected_sha1 {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 #[derive(Debug)]
 struct RemoteMetadata {
-    location: String,
+    url: String,
     sha1: String,
-    size: usize,
+    size: u64,
 }
 
 impl From<&Resource> for RemoteMetadata {
     fn from(res: &Resource) -> Self {
         Self {
-            location: res.url.clone(),
+            url: res.url.clone(),
             sha1: res.sha1.clone(),
             size: res.size,
         }
@@ -56,188 +76,148 @@ impl From<&Resource> for RemoteMetadata {
 }
 
 #[derive(Debug)]
+enum IndexType {
+    GameFile { path: PathBuf },
+    AssetIndex { id: String, assets_dir: PathBuf },
+    NativeArtifact { natives_dir: PathBuf },
+}
+
+#[derive(Debug)]
 struct Index {
     metadata: RemoteMetadata,
-    location: PathBuf,
+    itype: IndexType,
 }
 
 impl Index {
     #[instrument]
-    async fn is_match_to_remote(&self) -> crate::Result<bool> {
-        let mut file = File::open(&self.location).await?;
-
-        let metadata = file.metadata().await?;
-        let remote_size = self.metadata.size;
-        let local_size = metadata.len();
-        if local_size != remote_size as u64 {
-            return Ok(false);
-        }
-
-        let remote_sha1 = &self.metadata.sha1;
-        let local_sha1 = &hex::encode({
-            let mut filebuf = Vec::with_capacity(remote_size);
-            file.read_to_end(&mut filebuf).await?;
-
-            task::spawn_blocking(|| {
-                let mut sha1 = Sha1::new();
-                sha1.update(filebuf);
-                sha1.finalize()
-            })
-            .await?
-        });
-        if local_sha1 != remote_sha1 {
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
-    #[instrument]
-    async fn pull(&self, client: &Client, validate: bool) -> crate::Result<()> {
-        const BUF_SIZE: usize = 1024 * 1024; //  1mb
-
-        if !self.location.exists() || (validate && !self.is_match_to_remote().await?) {
-            if let Some(parent) = self.location.parent() {
-                create_dir_all(parent).await?;
+    async fn pull(&self, downloader: &Manager) -> crate::Result<()> {
+        match &self.itype {
+            IndexType::GameFile { path } => {
+                if !validate_file(&path, &self.metadata.sha1, self.metadata.size).await? {
+                    downloader.download_file(&self.metadata.url, &path).await?;
+                }
             }
-            let file = File::create(&self.location).await?;
-            let mut output = BufWriter::with_capacity(BUF_SIZE, file);
-            download(client, &self.metadata.location, &mut output).await?;
-            output.flush().await?;
-            info!("File downloaded");
-        } else {
-            info!("File already exists");
-        }
+            IndexType::AssetIndex { id, assets_dir } => {
+                let asset_index_path = assets_dir.join(format!("indexes/{}.json", id));
+                if !validate_file(&asset_index_path, &self.metadata.sha1, self.metadata.size)
+                    .await?
+                {
+                    downloader
+                        .download_file(&self.metadata.url, &asset_index_path)
+                        .await?;
+                }
+                let asset_index: AssetIndex = {
+                    let filebuf = fs::read(&asset_index_path).await?;
+                    serde_json::from_slice(&filebuf)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                };
+                let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
+                for (path, metadata @ AssetMetadata { hash, size }) in &asset_index.objects {
+                    let obj_path = assets_dir.join(if is_legacy_assets {
+                        format!("virtual/legacy/{}", path)
+                    } else {
+                        format!("objects/{}", metadata.hashed_id())
+                    });
 
+                    if !validate_file(&obj_path, hash, *size).await? {
+                        downloader
+                            .download_file(get_asset_url(metadata), &obj_path)
+                            .await?;
+                    }
+                }
+            }
+            IndexType::NativeArtifact { natives_dir } => {
+                if !natives_dir.exists() {
+                    let mut filebuf = Vec::with_capacity(self.metadata.size as usize);
+                    downloader
+                        .download(&self.metadata.url, &mut filebuf)
+                        .await?;
+                    let natives_dir = natives_dir.clone();
+                    // TODO : span here
+                    task::spawn_blocking(move || {
+                        let mut cursor = Cursor::new(filebuf);
+                        let mut native_artifact = ZipArchive::new(&mut cursor)?;
+                        native_artifact.extract(natives_dir)
+                    })
+                    .await??;
+                }
+            }
+        }
         Ok(())
     }
 }
 
 pub struct Repository {
-    client: Client,
+    downloader: Manager,
     indices: Vec<Index>,
-    /// they are treated as `indices`, but it's special case with zip archives
-    natives_indices: Vec<RemoteMetadata>,
-    natives_dir: PathBuf,
 }
 
 impl Repository {
-    pub fn new(client: Client) -> Self {
-        Self {
-            client,
-            indices: vec![],
-            natives_indices: vec![],
-            natives_dir: PathBuf::new(),
-        }
-    }
-
-    pub fn track_version_info(
-        client: Client,
+    pub fn new(
+        downloader: Manager,
         assets_dir: &Path,
         libraries_dir: &Path,
         version_dir: &Path,
         natives_dir: &Path,
         version: &VersionInfo,
     ) -> Self {
-        let mut indices = Vec::new();
-        indices.push(Index {
-            metadata: RemoteMetadata::from(&version.asset_index.resource),
-            location: assets_dir.join(format!("indexes/{}.json", &version.asset_index.id)),
-        });
-        indices.push(Index {
-            metadata: RemoteMetadata::from(&version.downloads.client),
-            location: version_dir.join("client.jar"),
-        });
+        let mut indices = vec![
+            Index {
+                metadata: RemoteMetadata::from(&version.asset_index.resource),
+                itype: IndexType::AssetIndex {
+                    id: version.assets.clone(),
+                    assets_dir: assets_dir.to_path_buf(),
+                },
+            },
+            Index {
+                metadata: RemoteMetadata::from(&version.downloads.client),
+                itype: IndexType::GameFile {
+                    path: version_dir.join("client.jar"),
+                },
+            },
+        ];
+        for lib in &version.libraries {
+            if lib.is_supported_by_rules() {
+                let resources = &lib.resources;
+                if let Some(artifact) = &resources.artifact {
+                    indices.push(Index {
+                        metadata: RemoteMetadata::from(&artifact.resource),
+                        itype: IndexType::GameFile {
+                            path: libraries_dir.join(&artifact.path),
+                        },
+                    });
+                }
+                if let Some(native_artifact) = resources.get_native_for_os() {
+                    indices.push(Index {
+                        metadata: RemoteMetadata::from(&native_artifact.resource),
+                        itype: IndexType::NativeArtifact {
+                            natives_dir: natives_dir.to_path_buf(),
+                        },
+                    });
+                }
+            }
+        }
         if let Some(logging) = &version.logging {
             indices.push(Index {
                 metadata: RemoteMetadata::from(&logging.client.config.resource),
-                location: version_dir.join(&logging.client.config.id),
+                itype: IndexType::GameFile {
+                    path: version_dir.join(&logging.client.config.id),
+                },
             });
         }
-        indices.extend(
-            version
-                .libraries
-                .iter()
-                .filter_map(|lib| {
-                    if lib.is_supported_by_rules() {
-                        lib.resources.artifact.as_ref()
-                    } else {
-                        None
-                    }
-                })
-                .map(|artifact| Index {
-                    metadata: RemoteMetadata::from(&artifact.resource),
-                    location: libraries_dir.join(&artifact.path),
-                }),
-        );
-        // Corner case where we can't store it like usual indices
-        // TODO : external method with unpacking
-        let natives_indices = version
-            .libraries
-            .iter()
-            .filter_map(|lib| {
-                if lib.is_supported_by_rules() {
-                    lib.resources.get_native_for_os()
-                } else {
-                    None
-                }
-            })
-            .map(|artifact| RemoteMetadata::from(&artifact.resource))
-            .collect();
-        Self {
-            client,
-            indices,
-            natives_indices,
-            natives_dir: natives_dir.to_path_buf(),
-        }
-    }
 
-    pub fn track_asset_index(client: Client, assets_dir: &Path, asset_index: &AssetIndex) -> Self {
-        let is_legacy_assets = asset_index.map_to_resources.unwrap_or(false);
-        let indices = asset_index
-            .objects
-            .iter()
-            .map(|(path, metadata @ AssetMetadata { hash, size })| Index {
-                metadata: RemoteMetadata {
-                    location: get_asset_url(metadata),
-                    sha1: hash.clone(),
-                    size: *size,
-                },
-                location: assets_dir.join(if is_legacy_assets {
-                    format!("virtual/legacy/{}", path)
-                } else {
-                    format!("object/{}", metadata.hashed_id())
-                }),
-            })
-            .collect();
         Self {
-            client,
+            downloader,
             indices,
-            natives_indices: vec![],
-            natives_dir: PathBuf::new(),
         }
     }
 
     #[instrument(skip(self))]
-    pub async fn pull_files(&self, concurrency: usize, validate: bool) -> crate::Result<()> {
+    pub async fn pull_indices(&self, concurrency: usize) -> crate::Result<()> {
         stream::iter(self.indices.iter())
             .map(Ok)
-            .try_for_each_concurrent(concurrency, |index| index.pull(&self.client, validate))
+            .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
             .await?;
-        if validate || !self.natives_dir.exists() {
-            for native_metadata in &self.natives_indices {
-                let mut filebuf = Vec::with_capacity(native_metadata.size);
-                download(&self.client, &native_metadata.location, &mut filebuf).await?;
-                let natives_dir = self.natives_dir.clone();
-                // TODO : span here
-                task::spawn_blocking(move || {
-                    let mut cursor = Cursor::new(filebuf);
-                    let mut native_artifact = ZipArchive::new(&mut cursor)?;
-                    native_artifact.extract(natives_dir)
-                })
-                .await??;
-            }
-        }
         Ok(())
     }
 }

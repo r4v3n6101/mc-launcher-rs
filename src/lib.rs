@@ -1,5 +1,6 @@
 use std::{io, result};
 
+pub mod download;
 pub mod file;
 pub mod metadata;
 pub mod resources;

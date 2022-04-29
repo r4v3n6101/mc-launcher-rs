@@ -5,7 +5,7 @@ use serde_derive::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct AssetMetadata {
     pub hash: String,
-    pub size: usize,
+    pub size: u64,
 }
 
 #[derive(Deserialize, Debug)]

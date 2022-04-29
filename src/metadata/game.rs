@@ -57,7 +57,7 @@ pub enum Arguments {
 #[derive(Deserialize, Debug)]
 pub struct Resource {
     pub sha1: String,
-    pub size: usize,
+    pub size: u64,
     pub url: String,
 }
 
@@ -67,7 +67,7 @@ pub struct AssetIndexResource {
     #[serde(flatten)]
     pub resource: Resource,
     pub id: String,
-    pub total_size: usize,
+    pub total_size: u64,
 }
 
 #[derive(Deserialize, Debug)]
