@@ -16,14 +16,17 @@ reqwest = { version = "0.11", features = ["json"] }
 futures-util = "0.3.21"
 
 zip = "0.6.2"
-dirs = "4"
-sha1 = "0.10.0"
-hex = "0.4.3"
+sha1 = { version = "0.10.0", optional = true }
+hex = { version = "0.4.3", optional = true }
 
 tracing = "0.1"
 thiserror = "1.0"
 
+[features]
+sha1 = ["dep:sha1", "dep:hex"]
+
 [dev-dependencies]
+dirs = "4"
 tokio = { version = "1.17", features = ["full"] }
 tracing-subscriber = "0.3.11"
 opentelemetry = "0.17.0"

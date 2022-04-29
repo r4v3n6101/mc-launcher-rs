@@ -5,7 +5,6 @@ use std::{
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
-use sha1::{Digest, Sha1};
 use tokio::{fs, task};
 use tracing::instrument;
 use zip::ZipArchive;
@@ -35,19 +34,23 @@ async fn validate_file(
         return Ok(false);
     }
 
-    let local_sha1 = &hex::encode({
-        let filebuf = fs::read(path).await?;
-        task::spawn_blocking(|| {
-            let mut sha1 = Sha1::new();
-            sha1.update(filebuf);
-            sha1.finalize()
-        })
-        .await?
-    });
-    if local_sha1 != expected_sha1 {
-        return Ok(false);
+    #[cfg(feature = "sha1")]
+    {
+        use hex::encode;
+        use sha1::{Digest, Sha1};
+        let local_sha1 = &encode({
+            let filebuf = fs::read(path).await?;
+            task::spawn_blocking(|| {
+                let mut sha1 = Sha1::new();
+                sha1.update(filebuf);
+                sha1.finalize()
+            })
+            .await?
+        });
+        if local_sha1 != expected_sha1 {
+            return Ok(false);
+        }
     }
-
     Ok(true)
 }
 
@@ -223,7 +226,6 @@ impl Repository {
         stream::iter(self.indices.iter())
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
-            .await?;
-        Ok(())
+            .await
     }
 }
