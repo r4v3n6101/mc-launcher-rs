@@ -43,6 +43,7 @@ async fn download_latest_release() {
             .await
             .unwrap();
         repository.pull_indices(128).await.unwrap();
+        assert_eq!(repository.pulled_indices(), repository.indices());
     }
     .instrument(download)
     .await;

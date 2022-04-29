@@ -2,6 +2,7 @@ use std::{
     fmt::Debug,
     io::{self, Cursor},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -116,6 +117,7 @@ impl Index {
 pub struct Repository {
     downloader: Manager,
     indices: Vec<Index>,
+    pulled_indices: AtomicUsize,
 }
 
 impl Repository {
@@ -123,11 +125,20 @@ impl Repository {
         Self {
             downloader,
             indices: vec![],
+            pulled_indices: AtomicUsize::new(0),
         }
     }
 
     pub fn downloader(&self) -> &Manager {
         &self.downloader
+    }
+
+    pub fn indices(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn pulled_indices(&self) -> usize {
+        self.pulled_indices.load(Ordering::Relaxed)
     }
 
     pub fn purge(&mut self) {
@@ -225,7 +236,11 @@ impl Repository {
     pub async fn pull_indices(&self, concurrency: usize) -> crate::Result<()> {
         stream::iter(self.indices.iter())
             .map(Ok)
-            .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
+            .try_for_each_concurrent(concurrency, |index| async {
+                index.pull(&self.downloader).await?;
+                self.pulled_indices.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
             .await
     }
 }
