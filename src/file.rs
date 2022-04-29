@@ -139,7 +139,6 @@ impl Repository {
         natives_dir: &Path,
         version: &VersionInfo,
     ) -> Self {
-        // TODO : size
         let mut indices = Vec::new();
         indices.push(Index {
             metadata: RemoteMetadata::from(&version.asset_index.resource),
@@ -159,8 +158,13 @@ impl Repository {
             version
                 .libraries
                 .iter()
-                // TODO : Filter by rules
-                .filter_map(|lib| lib.resources.artifact.as_ref())
+                .filter_map(|lib| {
+                    if lib.is_supported_by_rules() {
+                        lib.resources.artifact.as_ref()
+                    } else {
+                        None
+                    }
+                })
                 .map(|artifact| Index {
                     metadata: RemoteMetadata::from(&artifact.resource),
                     location: libraries_dir.join(&artifact.path),
@@ -171,8 +175,13 @@ impl Repository {
         let natives_indices = version
             .libraries
             .iter()
-            // TODO : Filter by rules
-            .filter_map(|lib| lib.resources.get_native_for_os())
+            .filter_map(|lib| {
+                if lib.is_supported_by_rules() {
+                    lib.resources.get_native_for_os()
+                } else {
+                    None
+                }
+            })
             .map(|artifact| RemoteMetadata::from(&artifact.resource))
             .collect();
         Self {
@@ -215,7 +224,7 @@ impl Repository {
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.pull(&self.client, validate))
             .await?;
-        if validate {
+        if validate || !self.natives_dir.exists() {
             for native_metadata in &self.natives_indices {
                 let mut filebuf = Vec::with_capacity(native_metadata.size);
                 download(&self.client, &native_metadata.location, &mut filebuf).await?;

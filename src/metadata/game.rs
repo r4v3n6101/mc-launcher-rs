@@ -1,11 +1,12 @@
-use std::{collections::HashMap, env::consts};
+use std::{collections::HashMap, env::consts, iter};
 
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
+use serde_with::{serde_as, OneOrMany, SpaceSeparator, StringWithSeparator};
 
 use super::manifest::ReleaseType;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Allow,
@@ -29,20 +30,19 @@ pub struct Rule {
 #[derive(Deserialize, Debug)]
 pub struct Rules(Vec<Rule>);
 
-#[derive(Deserialize, Debug)]
-#[serde(untagged)]
-pub enum ArgumentValue {
-    One(String),
-    Many(Vec<String>),
-}
-
+#[serde_as]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum Argument {
     Plain(String),
-    RuleSpecific { value: ArgumentValue, rules: Rules },
+    RuleSpecific {
+        #[serde_as(deserialize_as = "OneOrMany<_>")]
+        value: Vec<String>,
+        rules: Rules,
+    },
 }
 
+#[serde_as]
 #[derive(Deserialize, Debug)]
 pub enum Arguments {
     #[serde(rename = "arguments")]
@@ -51,7 +51,7 @@ pub enum Arguments {
         jvm: Vec<Argument>,
     },
     #[serde(rename = "minecraftArguments")]
-    Legacy(String),
+    Legacy(#[serde_as(as = "StringWithSeparator::<SpaceSeparator, String>")] Vec<String>),
 }
 
 #[derive(Deserialize, Debug)]
@@ -146,6 +146,122 @@ pub struct VersionInfo {
     pub java_version: Option<JavaVersion>,
     pub logging: Option<Logging>,
     pub compliance_level: Option<usize>,
+}
+
+impl RuleAction {
+    pub fn value(self) -> bool {
+        match self {
+            Self::Allow => true,
+            Self::Disallow => false,
+        }
+    }
+
+    pub fn invert(self) -> Self {
+        match self {
+            Self::Allow => Self::Disallow,
+            Self::Disallow => Self::Allow,
+        }
+    }
+
+    pub fn chain(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Allow, Self::Allow) => Self::Allow,
+            _ => Self::Disallow,
+        }
+    }
+}
+
+impl Rule {
+    fn calculate_action(&self, params: &HashMap<&str, bool>) -> RuleAction {
+        if let Some(os) = &self.os {
+            if let Some(name) = &os.name {
+                if name != consts::OS {
+                    return self.action.invert();
+                }
+            }
+            if let Some(arch) = &os.arch {
+                if arch != consts::ARCH {
+                    return self.action.invert();
+                }
+            }
+            if let Some(version) = &os.version {
+                // TODO: version parsing using crate
+            }
+        }
+        if let Some(features) = &self.features {
+            for (k, v) in features.iter() {
+                if params.get(k.as_str()).unwrap_or(&false) != v {
+                    return self.action.invert();
+                }
+            }
+        }
+        self.action
+    }
+
+    pub fn is_allowed(&self, params: &HashMap<&str, bool>) -> bool {
+        self.calculate_action(params) == RuleAction::Allow
+    }
+}
+
+impl Rules {
+    pub fn is_allowed(&self, params: &HashMap<&str, bool>) -> bool {
+        self.0.iter().any(|rule| rule.is_allowed(params))
+    }
+}
+
+impl Argument {
+    pub fn iter_strings<'a, 'b: 'a>(
+        &'a self,
+        features: &'b HashMap<&'b str, bool>,
+    ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
+        match self {
+            Self::Plain(s) => Box::new(iter::once(s.as_str())),
+            Self::RuleSpecific { value, rules } => {
+                if rules.is_allowed(features) {
+                    Box::new(value.iter().map(String::as_str))
+                } else {
+                    Box::new(iter::empty())
+                }
+            }
+        }
+    }
+}
+
+impl Arguments {
+    pub fn iter_jvm_args<'a, 'b: 'a>(
+        &'a self,
+        params: &'b HashMap<&'b str, bool>,
+    ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
+        match self {
+            Self::Modern { jvm, .. } => Box::new(
+                jvm.iter()
+                    .flat_map(|argument| argument.iter_strings(params)),
+            ),
+            Self::Legacy(_) => Box::new(iter::empty()),
+        }
+    }
+
+    pub fn iter_game_args<'a, 'b: 'a>(
+        &'a self,
+        params: &'b HashMap<&'b str, bool>,
+    ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
+        match self {
+            Self::Modern { game, .. } => Box::new(
+                game.iter()
+                    .flat_map(|argument| argument.iter_strings(params)),
+            ),
+            Self::Legacy(s) => Box::new(s.iter().map(String::as_str)),
+        }
+    }
+}
+
+impl Library {
+    pub fn is_supported_by_rules(&self) -> bool {
+        self.rules
+            .as_ref()
+            .map(|rules| rules.is_allowed(&HashMap::new()))
+            .unwrap_or(false)
+    }
 }
 
 impl LibraryResources {
