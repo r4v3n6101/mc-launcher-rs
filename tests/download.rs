@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use mcl_rs::{
-    download::Manager,
-    file::{game::Repository, Hierarchy},
-    process::GameCommand,
+    io::{download::Manager, file::Hierarchy, game::Repository, process::GameCommand},
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;

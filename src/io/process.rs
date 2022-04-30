@@ -9,7 +9,7 @@ use std::{
 
 use tokio::process::Command;
 
-use crate::{file::Hierarchy, metadata::game::VersionInfo};
+use crate::{io::file::Hierarchy, metadata::game::VersionInfo};
 
 fn substitute_arg<'a>(arg: &'a str, params: &'a HashMap<&str, &OsStr>) -> Cow<'a, OsStr> {
     if let Some(i) = arg.find("${") {

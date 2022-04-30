@@ -1,15 +1,13 @@
-use std::{io, result};
+use std::result;
 
-pub mod download;
-pub mod file;
+pub mod io;
 pub mod metadata;
-pub mod process;
 pub mod resources;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
     #[error(transparent)]

@@ -11,7 +11,7 @@ use tracing::instrument;
 use zip::ZipArchive;
 
 use crate::{
-    download::Manager,
+    io::download::Manager,
     metadata::{
         assets::{AssetIndex, AssetMetadata},
         game::{Resource, VersionInfo},

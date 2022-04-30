@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-pub mod game;
-
 pub struct Hierarchy {
     pub gamedir: PathBuf,
     pub assets_dir: PathBuf,
