@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use mcl_rs::{
     download::Manager,
-    file::Repository,
-    process::spawn_game,
+    file::{game::Repository, Hierarchy},
+    process::GameProcess,
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
@@ -27,20 +27,17 @@ async fn download_latest_release() {
     let version = fetch_version_info(&client, &last_release).await.unwrap();
 
     let download = info_span!("download_latest_release");
-    let gamedir = dirs::data_dir()
-        .map(|data| data.join("minecraft"))
-        .or_else(|| dirs::home_dir().map(|home| home.join(".minecraft")))
-        .expect("neither home nor data dirs found");
-    let assets_dir = gamedir.join("assets/");
-    let libraries_dir = gamedir.join("libraries/");
-    let version_dir = gamedir.join(format!("versions/{}", &version.id));
-    let natives_dir = version_dir.join("natives/");
+    let file_hierarchy = Hierarchy::with_default_structure(&version.id);
     async {
         let mut repository = Repository::new(Manager::default());
-        repository.track_libraries(libraries_dir.as_path(), natives_dir.as_path(), &version);
-        repository.track_client(version_dir.as_path(), &version);
+        repository.track_libraries(
+            file_hierarchy.libraries_dir.as_path(),
+            file_hierarchy.natives_dir.as_path(),
+            &version,
+        );
+        repository.track_client(file_hierarchy.version_dir.as_path(), &version);
         repository
-            .track_asset_objects(assets_dir.as_path(), &version)
+            .track_asset_objects(file_hierarchy.assets_dir.as_path(), &version)
             .await
             .unwrap();
         repository.pull_indices(512).await.unwrap();
@@ -50,17 +47,12 @@ async fn download_latest_release() {
     .await;
 
     let features = HashMap::new();
-    spawn_game(
-        &gamedir,
-        &assets_dir,
-        &libraries_dir,
-        &natives_dir,
-        &version_dir,
-        &version,
-        &features,
-    )
-    .wait()
-    .await
-    .unwrap();
+    let process = GameProcess::new(&file_hierarchy.gamedir, &version, &features);
+    process
+        .spawn_with_default_params(&version, "test", &file_hierarchy)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     opentelemetry::global::shutdown_tracer_provider();
 }
