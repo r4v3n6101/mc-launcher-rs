@@ -75,7 +75,7 @@ impl From<&Resource> for RemoteMetadata {
 #[derive(Debug)]
 enum IndexType {
     GameFile { path: PathBuf },
-    NativeArtifact { natives_dir: PathBuf },
+    NativeArtifact { path: PathBuf, natives_dir: PathBuf },
 }
 
 #[derive(Debug)]
@@ -93,12 +93,12 @@ impl Index {
                     downloader.download_file(&self.metadata.url, &path).await?;
                 }
             }
-            IndexType::NativeArtifact { natives_dir } => {
-                if !natives_dir.exists() {
-                    let mut filebuf = Vec::with_capacity(self.metadata.size as usize);
-                    downloader
-                        .download(&self.metadata.url, &mut filebuf)
-                        .await?;
+            IndexType::NativeArtifact { path, natives_dir } => {
+                if !validate_file(&path, &self.metadata.sha1, self.metadata.size).await?
+                    || !natives_dir.exists()
+                {
+                    downloader.download_file(&self.metadata.url, &path).await?;
+                    let filebuf = fs::read(&path).await?;
                     let natives_dir = natives_dir.clone();
                     // TODO : span here
                     task::spawn_blocking(move || {
@@ -114,6 +114,7 @@ impl Index {
     }
 }
 
+// TODO : lifetime for indices
 pub struct Repository {
     downloader: Manager,
     indices: Vec<Index>,
@@ -207,6 +208,7 @@ impl Repository {
                     self.indices.push(Index {
                         metadata: RemoteMetadata::from(&native_artifact.resource),
                         itype: IndexType::NativeArtifact {
+                            path: libraries_dir.join(&native_artifact.path),
                             natives_dir: natives_dir.to_path_buf(),
                         },
                     });

@@ -23,6 +23,7 @@ pub async fn fetch_version_info(client: &Client, version: &Version) -> crate::Re
     Ok(client.get(&version.url).send().await?.json().await?)
 }
 
+// TODO : reduce allocation
 pub fn get_asset_url(asset_metadata: &AssetMetadata) -> String {
     format!("{}{}", RESOURCE_REGISTRY_URL, asset_metadata.hashed_id())
 }

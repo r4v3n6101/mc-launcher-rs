@@ -210,9 +210,9 @@ impl Rules {
 }
 
 impl Argument {
-    pub fn iter_strings<'a, 'b: 'a>(
+    pub fn iter_strings<'a>(
         &'a self,
-        features: &'b HashMap<&'b str, bool>,
+        features: &HashMap<&str, bool>,
     ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
         match self {
             Self::Plain(s) => Box::new(iter::once(s.as_str())),
@@ -230,7 +230,7 @@ impl Argument {
 impl Arguments {
     pub fn iter_jvm_args<'a, 'b: 'a>(
         &'a self,
-        params: &'b HashMap<&'b str, bool>,
+        params: &'b HashMap<&str, bool>,
     ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
         match self {
             Self::Modern { jvm, .. } => Box::new(
@@ -243,7 +243,7 @@ impl Arguments {
 
     pub fn iter_game_args<'a, 'b: 'a>(
         &'a self,
-        params: &'b HashMap<&'b str, bool>,
+        params: &'b HashMap<&str, bool>,
     ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
         match self {
             Self::Modern { game, .. } => Box::new(

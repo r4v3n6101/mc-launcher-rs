@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use mcl_rs::{
     download::Manager,
     file::Repository,
+    process::spawn_game,
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
@@ -49,19 +50,17 @@ async fn download_latest_release() {
     .await;
 
     let features = HashMap::new();
-    let jvm_args = version
-        .arguments
-        .iter_jvm_args(&features)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let game_args = version
-        .arguments
-        .iter_game_args(&features)
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    println!("JVM args: {}", jvm_args);
-    println!("Game args: {}", game_args);
-
+    spawn_game(
+        &gamedir,
+        &assets_dir,
+        &libraries_dir,
+        &natives_dir,
+        &version_dir,
+        &version,
+        &features,
+    )
+    .wait()
+    .await
+    .unwrap();
     opentelemetry::global::shutdown_tracer_provider();
 }

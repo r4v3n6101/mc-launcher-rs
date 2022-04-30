@@ -3,6 +3,7 @@ use std::{io, result};
 pub mod download;
 pub mod file;
 pub mod metadata;
+pub mod process;
 pub mod resources;
 
 #[derive(thiserror::Error, Debug)]

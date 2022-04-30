@@ -7,7 +7,7 @@ use std::{
 use reqwest::{Client, IntoUrl};
 use tokio::{
     fs::{create_dir_all, File},
-    io::{AsyncWrite, AsyncWriteExt, BufWriter},
+    io::{AsyncWriteExt, BufWriter},
 };
 use tracing::{debug, instrument, trace};
 
@@ -33,24 +33,6 @@ impl Manager {
         self.downloaded_bytes = AtomicU64::new(0);
     }
 
-    #[instrument(skip(writer))]
-    pub async fn download<U, W>(&self, url: U, writer: &mut W) -> crate::Result<()>
-    where
-        U: IntoUrl + Debug,
-        W: AsyncWrite + Unpin + Debug,
-    {
-        let mut response = self.client.get(url).send().await?;
-        debug!(?response, "Remote responded");
-        while let Some(chunk) = response.chunk().await? {
-            let len = chunk.len();
-            trace!(len, "New chunk arrived");
-            writer.write_all(&chunk).await?;
-            self.downloaded_bytes
-                .fetch_add(len as u64, Ordering::Relaxed);
-        }
-        Ok(())
-    }
-
     #[instrument]
     pub async fn download_file<U, P>(&self, url: U, path: P) -> crate::Result<()>
     where
@@ -65,7 +47,15 @@ impl Manager {
         }
         let file = File::create(&path).await?;
         let mut output = BufWriter::with_capacity(BUF_SIZE, file);
-        self.download(url, &mut output).await?;
+        let mut response = self.client.get(url).send().await?;
+        debug!(?response, "Remote responded");
+        while let Some(chunk) = response.chunk().await? {
+            let len = chunk.len();
+            trace!(len, "New chunk arrived");
+            output.write_all(&chunk).await?;
+            self.downloaded_bytes
+                .fetch_add(len as u64, Ordering::Relaxed);
+        }
         output.flush().await?;
 
         Ok(())
