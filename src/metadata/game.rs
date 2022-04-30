@@ -162,13 +162,6 @@ impl RuleAction {
             Self::Disallow => Self::Allow,
         }
     }
-
-    pub fn chain(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Allow, Self::Allow) => Self::Allow,
-            _ => Self::Disallow,
-        }
-    }
 }
 
 impl Rule {
@@ -199,7 +192,7 @@ impl Rule {
     }
 
     pub fn is_allowed(&self, params: &HashMap<&str, bool>) -> bool {
-        self.calculate_action(params) == RuleAction::Allow
+        self.calculate_action(params).value()
     }
 }
 

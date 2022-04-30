@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use mcl_rs::{
     download::Manager,
     file::{game::Repository, Hierarchy},
-    process::GameProcess,
+    process::GameCommand,
     resources::{fetch_manifest, fetch_version_info},
 };
 use reqwest::Client;
@@ -47,11 +47,15 @@ async fn download_latest_release() {
     .await;
 
     let features = HashMap::new();
-    let process = GameProcess::new(&file_hierarchy.gamedir, &version, &features);
+    let process = GameCommand::new(
+        &file_hierarchy.gamedir,
+        "java".as_ref(),
+        &version,
+        &features,
+    );
     process
-        .spawn_with_default_params(&version, "test", &file_hierarchy)
-        .unwrap()
-        .wait()
+        .build_with_default_params(&file_hierarchy, &version, "test")
+        .output()
         .await
         .unwrap();
     opentelemetry::global::shutdown_tracer_provider();

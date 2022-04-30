@@ -7,8 +7,7 @@ use std::{
     path::Path,
 };
 
-use tokio::process::{Child, Command};
-use tracing::{instrument, trace};
+use tokio::process::Command;
 
 use crate::{file::Hierarchy, metadata::game::VersionInfo};
 
@@ -29,16 +28,18 @@ fn substitute_arg<'a>(arg: &'a str, params: &'a HashMap<&str, &OsStr>) -> Cow<'a
     Cow::Borrowed(OsStr::new(arg))
 }
 
-pub struct GameProcess<'a> {
+pub struct GameCommand<'a> {
     cwd: &'a Path,
+    java_path: &'a OsStr,
     jvm_args: Vec<&'a str>,
     game_args: Vec<&'a str>,
     main_class: &'a str,
 }
 
-impl<'a> GameProcess<'a> {
+impl<'a> GameCommand<'a> {
     pub fn new<'b: 'a>(
         cwd: &'a Path,
+        java_path: &'a OsStr,
         version: &'a VersionInfo,
         features: &'b HashMap<&str, bool>,
     ) -> Self {
@@ -47,33 +48,46 @@ impl<'a> GameProcess<'a> {
 
         Self {
             cwd,
+            java_path,
             jvm_args,
             game_args,
             main_class: &version.main_class,
         }
     }
 
-    #[instrument(skip(self))]
-    pub fn spawn_game(&self, params: &HashMap<&str, &OsStr>) -> crate::Result<Child> {
+    pub fn jvm_arg(&mut self, arg: &'a str) {
+        self.jvm_args.push(arg);
+    }
+
+    pub fn clear_jvm_args(&mut self) {
+        self.jvm_args.clear();
+    }
+
+    pub fn game_arg(&mut self, arg: &'a str) {
+        self.game_args.push(arg);
+    }
+
+    pub fn clear_game_args(&mut self) {
+        self.game_args.clear();
+    }
+
+    pub fn build(&self, params: &HashMap<&str, &OsStr>) -> Command {
         let jvm_args = self.jvm_args.iter().map(|arg| substitute_arg(arg, params));
         let game_args = self.game_args.iter().map(|arg| substitute_arg(arg, params));
-        // TODO : replace java
-        let mut command = Command::new("java");
+        let mut command = Command::new(self.java_path);
         command.current_dir(self.cwd);
         command.args(jvm_args);
         command.arg(OsStr::new(&self.main_class));
         command.args(game_args);
-        trace!(?command);
-
-        Ok(command.spawn()?)
+        command
     }
 
-    pub fn spawn_with_default_params(
+    pub fn build_with_default_params(
         &self,
+        hierarchy: &'a Hierarchy,
         version: &'a VersionInfo,
         username: &'a str,
-        hierarchy: &'a Hierarchy,
-    ) -> crate::Result<Child> {
+    ) -> Command {
         const LAUNCHER_NAME: &str = env!("CARGO_PKG_NAME");
         const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -105,6 +119,6 @@ impl<'a> GameProcess<'a> {
         params.insert("auth_player_name", username.as_ref());
         // TODO : and so on
 
-        self.spawn_game(&params)
+        self.build(&params)
     }
 }
