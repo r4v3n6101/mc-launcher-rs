@@ -5,9 +5,8 @@ use std::{
     ffi::{OsStr, OsString},
     iter,
     path::Path,
+    process::Command,
 };
-
-use tokio::process::Command;
 
 use crate::{io::file::Hierarchy, metadata::game::VersionInfo};
 

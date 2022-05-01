@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
 use mcl_rs::{
-    io::{download::Manager, file::Hierarchy, game::Repository, process::GameCommand},
-    resources::{fetch_manifest, fetch_version_info},
+    io::{file::Hierarchy, sync::Repository},
+    process::GameCommand,
+    resources::fetch_manifest,
 };
 use reqwest::Client;
-use tracing::{info_span, subscriber, Instrument};
+use tokio::process::Command;
+use tracing::subscriber;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
 #[tokio::test]
@@ -22,39 +24,31 @@ async fn download_latest_release() {
 
     let manifest = fetch_manifest(&client).await.unwrap();
     let last_release = manifest.latest_release().unwrap();
-    let version = fetch_version_info(&client, &last_release).await.unwrap();
 
-    let download = info_span!("download_latest_release");
-    let file_hierarchy = Hierarchy::with_default_structure(&version.id);
-    async {
-        let mut repository = Repository::new(Manager::default());
-        repository.track_libraries(
-            file_hierarchy.libraries_dir.as_path(),
-            file_hierarchy.natives_dir.as_path(),
-            &version,
-        );
-        repository.track_client(file_hierarchy.version_dir.as_path(), &version);
-        repository
-            .track_asset_objects(file_hierarchy.assets_dir.as_path(), &version)
-            .await
-            .unwrap();
-        repository.pull_indices(512).await.unwrap();
-        assert_eq!(repository.pulled_indices(), repository.indices());
-    }
-    .instrument(download)
-    .await;
+    let file_hierarchy = Hierarchy::with_default_structure(&last_release.id);
 
-    let features = HashMap::new();
-    let process = GameCommand::new(
-        &file_hierarchy.gamedir,
-        "java".as_ref(),
-        &version,
-        &features,
-    );
-    process
-        .build_with_default_params(&file_hierarchy, &version, "test")
-        .output()
+    let repository = Repository::fetch(client, file_hierarchy, &last_release)
         .await
         .unwrap();
+    repository.pull(512).await.unwrap();
+
+    let features = HashMap::new();
+    let command = GameCommand::new(
+        &repository.hierarchy().gamedir,
+        "java".as_ref(),
+        &repository.version_info(),
+        &features,
+    );
+    Command::from(command.build_with_default_params(
+        &repository.hierarchy(),
+        &repository.version_info(),
+        "test",
+    ))
+    .spawn()
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+
     opentelemetry::global::shutdown_tracer_provider();
 }

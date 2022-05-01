@@ -1,4 +1,5 @@
 use reqwest::Client;
+use url::Url;
 
 use crate::metadata::{
     assets::AssetMetadata,
@@ -20,10 +21,15 @@ pub async fn fetch_manifest(client: &Client) -> crate::Result<VersionsManifest> 
 }
 
 pub async fn fetch_version_info(client: &Client, version: &Version) -> crate::Result<VersionInfo> {
-    Ok(client.get(&version.url).send().await?.json().await?)
+    Ok(client.get(version.url.clone()).send().await?.json().await?)
 }
 
-// TODO : reduce allocation
-pub fn get_asset_url(asset_metadata: &AssetMetadata) -> String {
-    format!("{}{}", RESOURCE_REGISTRY_URL, asset_metadata.hashed_id())
+pub fn get_asset_url(asset_metadata: &AssetMetadata) -> Url {
+    Url::parse(&format!(
+        "{}/{}/{}",
+        RESOURCE_REGISTRY_URL,
+        &asset_metadata.hash[..2],
+        &asset_metadata.hash
+    ))
+    .unwrap()
 }

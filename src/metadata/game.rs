@@ -3,6 +3,7 @@ use std::{collections::HashMap, env::consts, iter};
 use chrono::{DateTime, Utc};
 use serde_derive::Deserialize;
 use serde_with::{serde_as, OneOrMany, SpaceSeparator, StringWithSeparator};
+use url::Url;
 
 use super::manifest::ReleaseType;
 
@@ -58,7 +59,7 @@ pub enum Arguments {
 pub struct Resource {
     pub sha1: String,
     pub size: u64,
-    pub url: String,
+    pub url: Url,
 }
 
 #[derive(Deserialize, Debug)]

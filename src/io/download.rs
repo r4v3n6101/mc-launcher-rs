@@ -29,10 +29,6 @@ impl Manager {
         self.downloaded_bytes.load(Ordering::Relaxed)
     }
 
-    pub fn reset_statistics(&mut self) {
-        self.downloaded_bytes = AtomicU64::new(0);
-    }
-
     #[instrument]
     pub async fn download_file<U, P>(&self, url: U, path: P) -> crate::Result<()>
     where

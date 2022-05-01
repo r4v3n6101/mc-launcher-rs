@@ -2,6 +2,7 @@ use std::result;
 
 pub mod io;
 pub mod metadata;
+pub mod process;
 pub mod resources;
 
 #[derive(thiserror::Error, Debug)]
