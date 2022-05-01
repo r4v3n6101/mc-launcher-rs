@@ -97,9 +97,7 @@ impl Index {
             downloader
                 .download_file(self.metadata.url.clone(), &self.local_path)
                 .await?;
-        }
-        if let IndexType::NativeArtifact { extract_dir } = &self.itype {
-            if !extract_dir.exists() {
+            if let IndexType::NativeArtifact { extract_dir } = &self.itype {
                 let filebuf = fs::read(&self.local_path).await?;
                 let extract_dir = extract_dir.clone();
                 // TODO : span here

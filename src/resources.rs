@@ -1,15 +1,11 @@
 use reqwest::Client;
 use url::Url;
 
-use crate::metadata::{
-    assets::AssetMetadata,
-    game::VersionInfo,
-    manifest::{Version, VersionsManifest},
-};
+use crate::metadata::{assets::AssetMetadata, manifest::VersionsManifest};
 
 pub static VERSIONS_MANIFEST_URL: &str =
     "https://launchermeta.mojang.com/mc/game/version_manifest.json";
-pub static RESOURCE_REGISTRY_URL: &str = "http://resources.download.minecraft.net/";
+pub static RESOURCE_REGISTRY_URL: &str = "http://resources.download.minecraft.net";
 
 pub async fn fetch_manifest(client: &Client) -> crate::Result<VersionsManifest> {
     Ok(client
@@ -18,10 +14,6 @@ pub async fn fetch_manifest(client: &Client) -> crate::Result<VersionsManifest> 
         .await?
         .json()
         .await?)
-}
-
-pub async fn fetch_version_info(client: &Client, version: &Version) -> crate::Result<VersionInfo> {
-    Ok(client.get(version.url.clone()).send().await?.json().await?)
 }
 
 pub fn get_asset_url(asset_metadata: &AssetMetadata) -> Url {

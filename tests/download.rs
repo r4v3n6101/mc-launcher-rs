@@ -30,7 +30,7 @@ async fn download_latest_release() {
     let repository = Repository::fetch(client, file_hierarchy, &last_release)
         .await
         .unwrap();
-    repository.pull(512).await.unwrap();
+    repository.pull(256).await.unwrap();
 
     let features = HashMap::new();
     let command = GameCommand::new(
