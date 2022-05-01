@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ffi::OsStr, sync::Arc};
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use mcl_rs::{
     io::{file::Hierarchy, sync::Repository},
     process::GameCommand,
@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let repository = Arc::new(Repository::fetch(client, file_hierarchy, latest_release).await?);
     let pb = ProgressBar::new(repository.indices() as u64);
     let ps = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+        "[{elapsed_precise}] {wide_bar:80.cyan/blue} {pos:>7}/{len:7} {msg}",
     )
     .unwrap()
     .progress_chars("##-");
@@ -47,8 +47,17 @@ async fn main() -> anyhow::Result<()> {
         let this = Arc::clone(&repository);
         let pb = pb.clone();
         task::spawn_blocking(move || {
-            while this.pulled_indices() < this.indices() {
-                pb.set_position(this.pulled_indices() as u64);
+            let mut prev = this.pulled_indices();
+            loop {
+                if this.pulled_indices() >= this.indices() {
+                    break;
+                }
+                if prev != this.pulled_indices() {
+                    prev = this.pulled_indices();
+
+                    pb.set_position(this.pulled_indices() as u64);
+                    pb.set_message(HumanBytes(this.downloader().downloaded_bytes()).to_string());
+                }
             }
         })
     };
@@ -56,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     pull_task.await??;
     update_pb_task.await?;
 
-    pb.finish_with_message("Game files pulled");
+    pb.finish();
 
     let features = HashMap::new();
     let command = GameCommand::new(
