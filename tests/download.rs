@@ -27,20 +27,20 @@ async fn download_latest_release() {
 
     let file_hierarchy = Hierarchy::with_default_structure(&last_release.id);
 
-    let repository = Repository::fetch(client, file_hierarchy, &last_release)
+    let repository = Repository::fetch(client, &file_hierarchy, last_release.url.clone())
         .await
         .unwrap();
     repository.pull(256).await.unwrap();
 
     let features = HashMap::new();
     let command = GameCommand::new(
-        &repository.hierarchy().gamedir,
+        file_hierarchy.gamedir.as_path(),
         "java".as_ref(),
         &repository.version_info(),
         &features,
     );
     Command::from(command.build_with_default_params(
-        &repository.hierarchy(),
+        &file_hierarchy,
         &repository.version_info(),
         "test",
     ))

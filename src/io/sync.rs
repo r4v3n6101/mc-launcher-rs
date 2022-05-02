@@ -2,7 +2,6 @@ use std::{
     fmt::Debug,
     io::{self, Cursor},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -17,7 +16,6 @@ use crate::{
     metadata::{
         assets::{AssetIndex, AssetMetadata},
         game::{Resource, VersionInfo},
-        manifest::Version,
     },
     resources::get_asset_url,
 };
@@ -115,27 +113,16 @@ impl Index {
 
 pub struct Repository {
     downloader: Manager,
-    hierarchy: Hierarchy,
     info: VersionInfo,
-
     indices: Vec<Index>,
-    pulled_indices: AtomicUsize,
 }
 
 impl Repository {
-    // TODO : remove version if not exists (no internet connection)
-    // TODO : do not move hierarchy
-    pub async fn fetch(
-        client: Client,
-        hierarchy: Hierarchy,
-        version: &Version,
-    ) -> crate::Result<Self> {
+    pub async fn fetch(client: Client, hierarchy: &Hierarchy, remote: Url) -> crate::Result<Self> {
         let downloader = Manager::new(client);
         let info_path = hierarchy.version_dir.join("info.json");
         if !info_path.exists() {
-            downloader
-                .download_file(version.url.clone(), &info_path)
-                .await?;
+            downloader.download_file(remote, &info_path).await?;
         }
         let info: VersionInfo = {
             let filebuf = fs::read(&info_path).await?;
@@ -218,10 +205,8 @@ impl Repository {
 
         Ok(Self {
             downloader,
-            hierarchy,
             info,
             indices,
-            pulled_indices: AtomicUsize::new(0),
         })
     }
 
@@ -229,31 +214,19 @@ impl Repository {
         &self.downloader
     }
 
-    pub fn hierarchy(&self) -> &Hierarchy {
-        &self.hierarchy
-    }
-
     pub fn version_info(&self) -> &VersionInfo {
         &self.info
     }
 
-    pub fn indices(&self) -> usize {
-        self.indices.len()
-    }
-
-    pub fn pulled_indices(&self) -> usize {
-        self.pulled_indices.load(Ordering::Relaxed)
+    pub fn tracked_size(&self) -> u64 {
+        self.indices.iter().map(|index| index.metadata.size).sum()
     }
 
     #[instrument(skip(self))]
     pub async fn pull(&self, concurrency: usize) -> crate::Result<()> {
         stream::iter(self.indices.iter())
             .map(Ok)
-            .try_for_each_concurrent(concurrency, |index| async {
-                index.pull(&self.downloader).await?;
-                self.pulled_indices.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            })
+            .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
             .await
     }
 }
