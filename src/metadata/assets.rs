@@ -17,6 +17,6 @@ pub struct AssetIndex {
 impl AssetMetadata {
     pub fn hashed_id(&self) -> String {
         // TODO : may be panic
-        format!("{}/{}", &self.hash[..2], self.hash)
+        format!("{}/{}", &self.hash[..2], &self.hash)
     }
 }

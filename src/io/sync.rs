@@ -1,7 +1,7 @@
 use std::{
     fmt::Debug,
     io::{self, Cursor},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -22,46 +22,9 @@ use crate::{
 
 use super::file::Hierarchy;
 
-#[instrument]
-async fn validate_file(
-    path: impl AsRef<Path> + Debug,
-    expected_sha1: &str,
-    expected_size: u64,
-) -> crate::Result<bool> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Ok(false);
-    }
-
-    let metadata = fs::metadata(path).await?;
-    if metadata.len() != expected_size {
-        return Ok(false);
-    }
-
-    #[cfg(feature = "sha1")]
-    {
-        use hex::encode;
-        use sha1::{Digest, Sha1};
-        let local_sha1 = &encode({
-            let filebuf = fs::read(path).await?;
-            task::spawn_blocking(|| {
-                let mut sha1 = Sha1::new();
-                sha1.update(filebuf);
-                sha1.finalize()
-            })
-            .await?
-        });
-        if local_sha1 != expected_sha1 {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 #[derive(Debug)]
 struct RemoteMetadata {
     url: Url,
-    sha1: String,
     size: u64,
 }
 
@@ -69,7 +32,6 @@ impl From<&Resource> for RemoteMetadata {
     fn from(res: &Resource) -> Self {
         Self {
             url: res.url.clone(),
-            sha1: res.sha1.clone(),
             size: res.size,
         }
     }
@@ -90,22 +52,33 @@ struct Index {
 
 impl Index {
     #[instrument]
+    async fn validate(&self) -> crate::Result<bool> {
+        if !self.local_path.exists() {
+            return Ok(false);
+        }
+
+        let metadata = fs::metadata(&self.local_path).await?;
+        if metadata.len() != self.metadata.size {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+    #[instrument]
     async fn pull(&self, downloader: &Manager) -> crate::Result<()> {
-        if !validate_file(&self.local_path, &self.metadata.sha1, self.metadata.size).await? {
-            downloader
-                .download_file(self.metadata.url.clone(), &self.local_path)
-                .await?;
-            if let IndexType::NativeArtifact { extract_dir } = &self.itype {
-                let filebuf = fs::read(&self.local_path).await?;
-                let extract_dir = extract_dir.clone();
-                // TODO : span here
-                task::spawn_blocking(move || {
-                    let mut cursor = Cursor::new(filebuf);
-                    let mut native_artifact = ZipArchive::new(&mut cursor)?;
-                    native_artifact.extract(extract_dir)
-                })
-                .await??;
-            }
+        downloader
+            .download_file(self.metadata.url.clone(), &self.local_path)
+            .await?;
+        if let IndexType::NativeArtifact { extract_dir } = &self.itype {
+            let filebuf = fs::read(&self.local_path).await?;
+            let extract_dir = extract_dir.clone();
+            // TODO : span here
+            task::spawn_blocking(move || {
+                let mut cursor = Cursor::new(filebuf);
+                let mut native_artifact = ZipArchive::new(&mut cursor)?;
+                native_artifact.extract(extract_dir)
+            })
+            .await??;
         }
         Ok(())
     }
@@ -115,6 +88,7 @@ pub struct Repository {
     downloader: Manager,
     info: VersionInfo,
     indices: Vec<Index>,
+    tracked: Vec<usize>,
 }
 
 impl Repository {
@@ -154,13 +128,13 @@ impl Repository {
             indices.push(Index {
                 metadata: RemoteMetadata {
                     url: get_asset_url(metadata),
-                    sha1: hash.clone(),
                     size: *size,
                 },
                 local_path: hierarchy.assets_dir.join(if is_legacy_assets {
                     format!("virtual/legacy/{}", path)
                 } else {
-                    format!("objects/{}", metadata.hashed_id())
+                    // TODO : may be panic
+                    format!("objects/{}/{}", &hash[..2], &hash)
                 }),
                 itype: IndexType::GameFile,
             });
@@ -207,6 +181,7 @@ impl Repository {
             downloader,
             info,
             indices,
+            tracked: vec![],
         })
     }
 
@@ -223,7 +198,22 @@ impl Repository {
     }
 
     #[instrument(skip(self))]
-    pub async fn pull(&self, concurrency: usize) -> crate::Result<()> {
+    pub async fn track_invalid(&mut self) -> crate::Result<()> {
+        for (i, index) in self.indices.iter().enumerate() {
+            if !index.validate().await? {
+                self.tracked.push(i);
+            }
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub fn track_all(&mut self) {
+        self.tracked = (0..self.indices.len()).collect();
+    }
+
+    #[instrument(skip(self))]
+    pub async fn pull_tracked(&self, concurrency: usize) -> crate::Result<()> {
         stream::iter(self.indices.iter())
             .map(Ok)
             .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
