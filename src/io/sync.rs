@@ -7,7 +7,7 @@ use std::{
 use futures_util::{stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use tokio::{fs, task};
-use tracing::instrument;
+use tracing::{info, instrument};
 use url::Url;
 use zip::ZipArchive;
 
@@ -194,28 +194,34 @@ impl Repository {
     }
 
     pub fn tracked_size(&self) -> u64 {
-        self.indices.iter().map(|index| index.metadata.size).sum()
+        self.tracked
+            .iter()
+            .map(|&i| self.indices[i].metadata.size)
+            .sum()
     }
 
     #[instrument(skip(self))]
     pub async fn track_invalid(&mut self) -> crate::Result<()> {
+        self.tracked.clear(); // prevent tracking same indices
         for (i, index) in self.indices.iter().enumerate() {
             if !index.validate().await? {
                 self.tracked.push(i);
             }
         }
+        info!("Tracked {} invalid indices", self.tracked.len());
         Ok(())
     }
 
     #[instrument(skip(self))]
     pub fn track_all(&mut self) {
         self.tracked = (0..self.indices.len()).collect();
+        info!("Tracked all indices with count: {} ", self.tracked.len());
     }
 
     #[instrument(skip(self))]
     pub async fn pull_tracked(&self, concurrency: usize) -> crate::Result<()> {
-        stream::iter(self.indices.iter())
-            .map(Ok)
+        stream::iter(self.tracked.iter())
+            .map(|&i| Ok(&self.indices[i]))
             .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
             .await
     }
