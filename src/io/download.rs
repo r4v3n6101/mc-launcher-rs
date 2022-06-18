@@ -1,7 +1,10 @@
 use std::{
     fmt::Debug,
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use reqwest::{Client, IntoUrl};
@@ -14,14 +17,14 @@ use tracing::{debug, instrument, trace};
 #[derive(Debug, Default)]
 pub struct Manager {
     client: Client,
-    downloaded_bytes: AtomicU64,
+    downloaded_bytes: Arc<AtomicU64>,
 }
 
 impl Clone for Manager {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
-            downloaded_bytes: AtomicU64::new(self.downloaded_bytes()),
+            downloaded_bytes: Arc::clone(&self.downloaded_bytes),
         }
     }
 }
@@ -30,7 +33,7 @@ impl Manager {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            downloaded_bytes: AtomicU64::new(0),
+            downloaded_bytes: Default::default(),
         }
     }
 
