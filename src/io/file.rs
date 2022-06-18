@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct Hierarchy {
     pub gamedir: PathBuf,
     pub assets_dir: PathBuf,

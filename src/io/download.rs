@@ -17,12 +17,25 @@ pub struct Manager {
     downloaded_bytes: AtomicU64,
 }
 
+impl Clone for Manager {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            downloaded_bytes: AtomicU64::new(self.downloaded_bytes()),
+        }
+    }
+}
+
 impl Manager {
     pub fn new(client: Client) -> Self {
         Self {
             client,
             downloaded_bytes: AtomicU64::new(0),
         }
+    }
+
+    pub fn reset(&self) {
+        self.downloaded_bytes.store(0, Ordering::Relaxed);
     }
 
     pub fn downloaded_bytes(&self) -> u64 {

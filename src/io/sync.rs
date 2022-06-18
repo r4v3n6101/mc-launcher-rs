@@ -5,9 +5,8 @@ use std::{
 };
 
 use futures_util::{stream, StreamExt, TryStreamExt};
-use reqwest::Client;
 use tokio::{fs, task};
-use tracing::{info, instrument};
+use tracing::instrument;
 use url::Url;
 use zip::ZipArchive;
 
@@ -84,16 +83,23 @@ impl Index {
     }
 }
 
-pub struct Repository {
-    downloader: Manager,
+pub struct RemoteRepository {
     info: VersionInfo,
     indices: Vec<Index>,
+}
+
+pub struct TrackedIndices<'a> {
+    remote: &'a RemoteRepository,
     tracked: Vec<usize>,
 }
 
-impl Repository {
-    pub async fn fetch(client: Client, hierarchy: &Hierarchy, remote: Url) -> crate::Result<Self> {
-        let downloader = Manager::new(client);
+impl RemoteRepository {
+    #[instrument]
+    pub async fn fetch(
+        downloader: &Manager,
+        hierarchy: &Hierarchy,
+        remote: Url,
+    ) -> crate::Result<Self> {
         let info_path = hierarchy.version_dir.join("info.json");
         if !info_path.exists() {
             downloader.download_file(remote, &info_path).await?;
@@ -112,7 +118,7 @@ impl Repository {
             local_path: asset_index_path.clone(),
             itype: IndexType::GameFile,
         };
-        asset_index.pull(&downloader).await?;
+        asset_index.pull(downloader).await?;
         let asset_index: AssetIndex = {
             let filebuf = fs::read(&asset_index_path).await?;
             serde_json::from_slice(&filebuf)
@@ -177,52 +183,58 @@ impl Repository {
             });
         }
 
-        Ok(Self {
-            downloader,
-            info,
-            indices,
-            tracked: vec![],
-        })
-    }
-
-    pub fn downloader(&self) -> &Manager {
-        &self.downloader
+        Ok(Self { info, indices })
     }
 
     pub fn version_info(&self) -> &VersionInfo {
         &self.info
     }
 
-    pub fn tracked_size(&self) -> u64 {
-        self.tracked
-            .iter()
-            .map(|&i| self.indices[i].metadata.size)
-            .sum()
+    pub fn bytes_size(&self) -> u64 {
+        self.indices.iter().map(|i| i.metadata.size).sum()
     }
 
     #[instrument(skip(self))]
-    pub async fn track_invalid(&mut self) -> crate::Result<()> {
-        self.tracked.clear(); // prevent tracking same indices
+    pub fn track_all(&self) -> TrackedIndices {
+        TrackedIndices {
+            remote: self,
+            tracked: (0..self.indices.len()).collect(),
+        }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn track_invalid(&self) -> crate::Result<TrackedIndices<'_>> {
+        let mut tracked = Vec::with_capacity(self.indices.len());
         for (i, index) in self.indices.iter().enumerate() {
             if !index.validate().await? {
-                self.tracked.push(i);
+                tracked.push(i);
             }
         }
-        info!("Tracked {} invalid indices", self.tracked.len());
-        Ok(())
+
+        Ok(TrackedIndices {
+            remote: self,
+            tracked,
+        })
+    }
+}
+
+impl TrackedIndices<'_> {
+    fn indices(&self) -> impl Iterator<Item = &Index> {
+        self.tracked
+            .iter()
+            .copied()
+            .map(|i| &self.remote.indices[i])
+    }
+
+    pub fn bytes_size(&self) -> u64 {
+        self.indices().map(|i| i.metadata.size).sum()
     }
 
     #[instrument(skip(self))]
-    pub fn track_all(&mut self) {
-        self.tracked = (0..self.indices.len()).collect();
-        info!("Tracked all indices with count: {} ", self.tracked.len());
-    }
-
-    #[instrument(skip(self))]
-    pub async fn pull_tracked(&self, concurrency: usize) -> crate::Result<()> {
-        stream::iter(self.tracked.iter())
-            .map(|&i| Ok(&self.indices[i]))
-            .try_for_each_concurrent(concurrency, |index| index.pull(&self.downloader))
+    pub async fn pull(&self, downloader: &Manager, concurrency: usize) -> crate::Result<()> {
+        stream::iter(self.indices())
+            .map(Ok)
+            .try_for_each_concurrent(concurrency, |index| index.pull(downloader))
             .await
     }
 }
