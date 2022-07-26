@@ -6,7 +6,7 @@ use std::{
 
 use futures_util::{stream, StreamExt, TryStreamExt};
 use tokio::{fs, task};
-use tracing::instrument;
+use tracing::{instrument, trace};
 use url::Url;
 use zip::ZipArchive;
 
@@ -53,11 +53,17 @@ impl Index {
     #[instrument]
     async fn validate(&self) -> crate::Result<bool> {
         if !self.local_path.exists() {
+            trace!("Path not exists");
             return Ok(false);
         }
 
         let metadata = fs::metadata(&self.local_path).await?;
         if metadata.len() != self.metadata.size {
+            trace!(
+                actual_len = metadata.len(),
+                expected_len = self.metadata.size,
+                "Mismatch length"
+            );
             return Ok(false);
         }
 
@@ -139,7 +145,6 @@ impl RemoteRepository {
                 local_path: hierarchy.assets_dir.join(if is_legacy_assets {
                     format!("virtual/legacy/{}", path)
                 } else {
-                    // TODO : may be panic
                     format!("objects/{}/{}", &hash[..2], &hash)
                 }),
                 itype: IndexType::GameFile,
