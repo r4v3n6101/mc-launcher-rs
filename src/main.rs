@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ffi::OsStr};
+use std::collections::HashMap;
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Fetching gamefiles index...");
     let repository =
         RemoteRepository::fetch(&downloader, &file_hierarchy, latest_release.url.clone()).await?;
+    println!("Fetched {}KB", downloader.downloaded_bytes() / 1024);
     downloader.reset();
 
     println!("Tracking indices to download...");
@@ -70,17 +71,13 @@ async fn main() -> anyhow::Result<()> {
     pb.finish_and_clear();
 
     let features = HashMap::new();
-    let command = GameCommand::new(
-        file_hierarchy.gamedir.as_path(),
-        OsStr::new("java"),
-        repository.version_info(),
-        &features,
-    );
-    let command = command.build_with_default_params(
+    let command = GameCommand::from_version_info(
         &file_hierarchy,
-        repository.version_info(),
+        &repository.version_info(),
+        &features,
         &args.username,
     );
+    let command = command.build("java");
     println!("Game command: {:?}", command);
 
     Command::from(command).spawn()?.wait().await?;
